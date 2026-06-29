@@ -1,0 +1,6 @@
+gen_side/*.pdf
+__pycache__/
+*.pyc
+.kimi_key
+assets/
+.*.swp
