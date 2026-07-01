@@ -342,7 +342,9 @@ def gen_txt():
     # ── 四、昨日出清回顾 ──
     lines.append("四、昨日出清回顾")
     lines.append("")
-    hourly = get_hourly(date_str)
+    # 出清回顾看的是昨日数据（日前出清滞后一天）
+    yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    hourly = get_hourly(yesterday_str)
     if hourly:
         lines.append("4.1 价格出清（24小时）")
         valid_p = [p for p in hourly if p is not None]
@@ -487,7 +489,7 @@ def gen_txt():
     # ── 八、水电占比与竞争空间 ──
     lines.append("八、水电占比与竞争空间（昨日逐时）")
     lines.append("")
-    comp_data = get_competition_data(date_str)
+    comp_data = get_competition_data(yesterday_str)
     if comp_data:
         lines.append("时段       负荷(MW)   水电(MW)   占比   净缺口(MW)   竞争判断")
         for cd in comp_data:
