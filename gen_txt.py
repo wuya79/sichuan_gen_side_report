@@ -13,7 +13,7 @@ Usage:
 
 import os, sys, re, logging
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 NGINX_DIR = "/var/www/reports"
 SELL_TXT = Path(NGINX_DIR) / "daily_latest.txt"
@@ -411,20 +411,28 @@ def gen_txt():
     lines.append(f"→ 水电是火电的{ratio}倍，火电在系统中几乎无存在感")
     lines.append("")
     lines.append("【数据表:火电开机趋势】")
+    # 计算近7日日期
+    today_dt = datetime.now()
+    d6 = today_dt - timedelta(days=6)
+    trend_headers = "  ".join((d6 + timedelta(days=i)).strftime("%m-%d") for i in range(7))
+    trend_title = f"近7日 {d6.strftime('%m-%d')}~{today_dt.strftime('%m-%d')}"
+    trend_col_hdr = f"指标               {trend_headers}   变化"
+
     lines.append("5.3 火电开机趋势（近7日）")
-    lines.append("06-23  06-24  06-25  06-26  06-27  06-28  06-29")
+    lines.append(trend_headers)
     if trend_days:
         parts_t = trend_days.split("→")
         lines.append("  ".join(p.strip() for p in parts_t[:7]) + f"（{thermal_units}台）")
     else:
-        lines.append(f"3,700  3,700  3,700  3,700  3,700  3,700  3,700（{thermal_units}台）")
+        vals = ["3,700"] * 7
+        lines.append("  ".join(vals) + f"（{thermal_units}台）")
     lines.append("趋势：连续7日持平，历史最低水平")
     lines.append("")
 
     # ── 六、趋势仪表盘 ──
-    lines.append("六、趋势仪表盘（近7日 06-23~06-29）")
+    lines.append(f"六、趋势仪表盘（{trend_title}）")
     lines.append("")
-    lines.append("指标               06-23   06-24   06-25   06-26   06-27   06-28   06-29   变化")
+    lines.append(trend_col_hdr)
     # 🔴 修复6: 趋势仪表盘数据提取
     trend_lines_map = {
         "电价": r"电价:\s*([\d→↑↓%元/MWh\s]+)",
@@ -451,13 +459,22 @@ def gen_txt():
     lines.append("7.1 滚动交易行情（D+2~D+4）")
     lines.append("合约日        均价        价格范围")
     price_range = ext(raw, r"范围(\d+-\d+)", "77-130")
-    for d in ["D+2(7/1)", "D+3(7/2)", "D+4(7/3)"]:
-        lines.append(f"{d}    {rolling_avg}         {price_range}")
+    d2 = today_dt + timedelta(days=2)
+    d3 = today_dt + timedelta(days=3)
+    d4 = today_dt + timedelta(days=4)
+    # 取月底最后一天（连续交易D+5~月底）
+    import calendar
+    # 如果today+4跨月了，月底按d4算；否则按today算
+    last_day_dt = d4 if d4.month != today_dt.month else today_dt
+    last_day = calendar.monthrange(last_day_dt.year, last_day_dt.month)[1]
+    end_str = f"{last_day_dt.month}/{last_day}"
+    for d, label in [(d2, "D+2"), (d3, "D+3"), (d4, "D+4")]:
+        lines.append(f"{label}({d.month}/{d.day})    {rolling_avg}         {price_range}")
     lines.append(f"滚动均价：{rolling_avg}元/MWh")
     lines.append("")
     lines.append("7.2 连续交易（D+5~月底）")
     lines.append("标的日       均价        价格范围")
-    lines.append(f"7/31        {rolling_avg}         {price_range}")
+    lines.append(f"{end_str}        {rolling_avg}         {price_range}")
     lines.append("")
     lines.append("7.3 价格对比")
     lines.append("市场类型        价格        与现货价差")
@@ -514,17 +531,19 @@ def gen_txt():
             lines.append(f"  有竞争空间：{h_start:02d}-{h_end:02d}时，净缺口+{min(gaps)}~+{max(gaps)} MW，水电占比{min(pcts)}-{max(pcts)}%")
         # 找供给最过剩的时段
         worst = min(comp_data, key=lambda cd: cd['gap'])
-        lines.append(f"  供给最过剩：{worst['hour']:02d}时净缺口{worst['gap']} MW")
         # 电价最高/最低从API取
         if hourly:
             hp = max(hourly)
             lp = min(hourly)
             hh = hourly.index(hp)
             lh = hourly.index(lp)
+            lines.append(f"  供给最过剩：{worst['hour']:02d}时净缺口{worst['gap']} MW")
             lines.append(f"  电价最高：{hh:02d}时{hp}元（{'紧平衡' if hp > 30 else '正常'}）")
             lines.append(f"  电价最低：{lh:02d}时{lp}元（净缺口为正但光伏大发）")
         else:
             lines.append(f"  供给最过剩：{worst['hour']:02d}时净缺口{worst['gap']} MW（供给过剩）")
+            lines.append(f"  电价最高：—")
+            lines.append(f"  电价最低：—")
     else:
         lines.append("  有竞争空间：09-14时，净缺口+1,365~+1,863 MW，水电占比74-78%")
         lines.append("  供给最过剩：13时净缺口-3,436 MW")

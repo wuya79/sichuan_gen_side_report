@@ -360,6 +360,7 @@ def build_prompt(report_text, chart_refs):
 
 生成后请自检：表格是否达到25张以上？每个分析框字数是否达标？"""
 
+    today_str = datetime.now().strftime("%Y年%m月%d日")
     user = f"""请根据以下四川燃煤电厂发电侧日报数据，生成完整的HTML报告。
 
 【硬性要求】
@@ -368,6 +369,7 @@ def build_prompt(report_text, chart_refs):
 3. 每个section结尾必须有分析框，字数达标、禁止复述表格数据、必须有指导意见
 4. 在对应section中引用图表：<img src="charts/xxx.png">
 5. 所有单元格填入实际数据
+6. 【重要】封面页的报告周期必须写为"{today_str}"，不要使用其他日期
 
 【数据】
 {report_text[:15000]}
