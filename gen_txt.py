@@ -94,6 +94,16 @@ def get_hourly(date_str):
         if valid_count < 12:
             log.warning(f"  24h电价有效数据仅{valid_count}个，认为数据不可用")
             return []
+        # 检查是否有连续6小时以上为0（不合理的尾部全零）
+        zero_run = 0
+        for v in hourly:
+            if v is not None and v == 0:
+                zero_run += 1
+                if zero_run >= 6:
+                    log.warning(f"  24h电价后半段连续{zero_run}小时为0，认为数据不可用")
+                    return []
+            else:
+                zero_run = 0
         return hourly
     except Exception as e:
         log.warning(f"  24h电价获取失败: {e}")
