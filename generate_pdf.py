@@ -15,7 +15,7 @@ Cron:
 
 import os, sys, re, json, logging, traceback
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -42,9 +42,14 @@ log = logging.getLogger("gen_side_pdf")
 
 
 def load_kimi_key():
+    # 优先环境变量，fallback到文件
+    env_key = os.getenv("KIMI_API_KEY", "").strip()
+    if env_key:
+        return env_key
     kf = SCRIPT_DIR / ".kimi_key"
-    if not kf.exists(): raise FileNotFoundError(f"Kimi Key不存在: {kf}")
-    return kf.read_text(encoding="utf-8").strip()
+    if kf.exists():
+        return kf.read_text(encoding="utf-8").strip()
+    raise FileNotFoundError(f"Kimi Key不存在: 请设置KIMI_API_KEY环境变量或创建 {kf}")
 
 
 def kimi_call(api_key, system, user, timeout=600, max_tokens=100000):
@@ -92,7 +97,7 @@ def move_captions(html):
 
 # ─── 图表生成 ─────────────────────────────────────────────────
 
-def parse_report_data(text):
+def parse_report_data(text, yesterday_str=None):
     """从发电侧txt解析结构化数据，含趋势标签和竞争空间逐时数据"""
     data = {}
     m = re.search(r"均价(\d+)", text)
@@ -139,9 +144,8 @@ def parse_report_data(text):
         raydon_path = Path(os.path.expanduser("~/sichuan_hydro_price"))
         sys.path.insert(0, str(raydon_path))
         import raydon_api as ra
-        date_str = re.search(r"(\d{4}-\d{2}-\d{2})", text)
-        if date_str:
-            ds = date_str.group(1)
+        if yesterday_str:
+            ds = yesterday_str
             hydro = ra.get_hydro_actual(ds)
             load = ra.get_actual_load(ds)
             if hydro and load:
@@ -348,19 +352,18 @@ def build_prompt(report_text, chart_refs):
 - 市场参考：300-500字。从交易策略角度研判：①期现价差含义 ②丰水期交易策略建议 ③风险预警
 
 【核心设计原则 - 表格精简】
-- 4.1 价格出清（24小时）：必须引用图表 <img src="charts/price_24h.png">，下方只展示最高/最低/均价3行摘要（最高190元@12时、最低0元@23时、均价12元），绝对不要输出24行的逐小时电价表
-- 5.1 火电24小时出力：可引用图表 <img src="charts/output_stack.png"> 展示各电源出力对比，火电部分用一段总结说明"全天出力完全平稳1736MW"，绝对不要输出24行的逐小时出力表
+- 4.1 价格出清（24小时）：必须引用图表 <img src="charts/price_24h.png">，下方只展示最高/最低/均价3行摘要，从图表和数据中提取实际值展示，不要臆想数值
+- 5.1 火电24小时出力：可引用图表 <img src="charts/output_stack.png"> 展示各电源出力对比，火电部分用一段总结说明，绝对不要输出24行的逐小时出力表
 - 其余表格正常生成，保持25张以上的目标
 【重要标记说明】
 数据中出现的 `【数据表:xxx】` 标记（如【数据表:天气前瞻】、【数据表:系统备用】、【数据表:来水偏差】、【数据表:昨日偏差】、【数据表:火电开机趋势】）后面的内容必须做成独立表格展示，不能只写在分析框文字里。
 {chart_refs}
 
 参考风格：
-【核心研判】丰水期深跌格局持续。水电占比97%满发运行，净缺口-7,256MW供给严重过剩。火电开机3,700MW连续7日持平历史最低，日均出力仅1,736MW。均价12元/MWh维持低位，但月内滚动均价115元较现货升水101元，反映远期市场对枯水期价格回升的预期。
+【核心研判】丰水期深跌格局持续。水电占比高位满发运行，供给严重过剩。火电开机连续多日持平历史最低，日均出力极低。现货均价维持在低位，但月内滚动均价较现货大幅升水，反映远期市场对枯水期价格回升的预期。
 
 生成后请自检：表格是否达到25张以上？每个分析框字数是否达标？"""
 
-    today_str = datetime.now().strftime("%Y年%m月%d日")
     user = f"""请根据以下四川燃煤电厂发电侧日报数据，生成完整的HTML报告。
 
 【硬性要求】
@@ -369,7 +372,6 @@ def build_prompt(report_text, chart_refs):
 3. 每个section结尾必须有分析框，字数达标、禁止复述表格数据、必须有指导意见
 4. 在对应section中引用图表：<img src="charts/xxx.png">
 5. 所有单元格填入实际数据
-6. 【重要】封面页的报告周期必须写为"{today_str}"，不要使用其他日期
 
 【数据】
 {report_text[:15000]}
@@ -514,7 +516,7 @@ def _gen_deviation_table(raw):
 def _gen_hydro_deviation(raw):
     """生成来水偏差HTML"""
     if not raw: return ""
-    m = re.search(r"⚠️\s*来水偏差:\s*([^\n]*)", raw)
+    m = re.search(r"[⚠️✅]?\s*来水偏差:\s*([^\n]*)", raw)
     if not m: return ""
     line = m.group(1).strip()
     return f'<table><tr><td>⚠️ 来水偏差：{line}</td></tr></table>\n<div class="table-caption">📊 来水偏差</div>\n'
@@ -553,16 +555,25 @@ def _fix_market_analysis(html, report_text):
     if box_start < 0 or box_end < 6: return html
     
     # 从发电侧txt取价差数据
-    spot = "12"
-    rolling = "115"
-    monthly = "160"
-    m = re.search(r"滚动均价（D\+2~D\+4）[：:](\d+)", report_text)
+    spot = None
+    rolling = None
+    monthly = None
+    m = re.search(r"全天均价[：:]\s*([\d.]+)", report_text)
+    if m: spot = m.group(1)
+    m = re.search(r"滚动均价（D\+2~D\+4）[：:]\s*(\d+)", report_text)
     if m: rolling = m.group(1)
-    m = re.search(r"现货与滚动价差[：:](\d+)", report_text)
-    spread = m.group(1) if m else "103"
+    m = re.search(r"月度平台价[：:]\s*(\d+)", report_text)
+    if m: monthly = m.group(1)
+    m = re.search(r"现货与滚动价差[：:]\s*(\d+)", report_text)
+    spread = m.group(1) if m else None
+    
+    spot_str = f"{spot}元" if spot else "—"
+    rolling_str = f"{rolling}元" if rolling else "—"
+    monthly_str = f"{monthly}元" if monthly else "—"
+    spread_str = f"{spread}元" if spread else "—"
     
     new_box = f"""<div class="analysis-box">
-        <p>【市场综合研判】全天均价{spot}元/MWh，现货与滚动均价{rolling}元价差{spread}元，期现价差反映远期枯水期价格预期。丰水期火电无竞争优势，建议保持最小开机状态，关注来水减弱信号（9月后水电出力下降）带来的市场格局变化。月度平台价{monthly}元进一步印证市场对远期电价的乐观预期，可择机锁定远期合约利润。</p>
+        <p>【市场综合研判】全天均价{spot_str}/MWh，现货与滚动均价{rolling_str}价差{spread_str}，期现价差反映远期枯水期价格预期。丰水期火电无竞争优势，建议保持最小开机状态，关注来水减弱信号（9月后水电出力下降）带来的市场格局变化。{'月度平台价' + monthly_str + '进一步印证市场对远期电价的乐观预期，可择机锁定远期合约利润。' if monthly else ''}</p>
     </div>"""
     
     return html[:box_start] + new_box + html[box_end:]
@@ -591,6 +602,12 @@ def generate_pdf(api_key):
         report_text = GEN_TXT.read_text(encoding="utf-8")
         date_match = re.search(r"(\d{4}-\d{2}-\d{2})", report_text)
         date_str = date_match.group(1) if date_match else datetime.now().strftime("%Y-%m-%d")
+        # 昨日日期（用于取昨日数据的API查询）
+        try:
+            _ydt = datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=1)
+            yesterday_str = _ydt.strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         date_short = date_str.replace("-", "")
         log.info(f"  读取完成: {len(report_text)}字符")
         
@@ -601,8 +618,8 @@ def generate_pdf(api_key):
         job_dir.mkdir(parents=True, exist_ok=True)
         charts_dir.mkdir(exist_ok=True)
         
-        data = parse_report_data(report_text)
-        chart_files = gen_charts(data, charts_dir, date_str=date_str)
+        data = parse_report_data(report_text, yesterday_str=yesterday_str)
+        chart_files = gen_charts(data, charts_dir, date_str=yesterday_str)
         chart_refs = "\n".join([f'<img src="charts/{f.name}">' for f in chart_files])
         log.info(f"  图表生成: {len(chart_files)}张")
         
@@ -665,8 +682,8 @@ def generate_pdf(api_key):
         
         result.update({
             "success": True,
-            "pdf_url": f"{NGINX_BASE}/gen_side/gen_side_latest.pdf",
-            "txt_url": f"{NGINX_BASE}/gen_side_latest.txt",
+            "pdf_url": f"{NGINX_BASE}/gen_side/gen_side_{date_short}.pdf",
+            "txt_url": f"{NGINX_BASE}/gen_side_{date_short}.txt",
             "date": date_str, "tables": html.count("<table>"),
             "charts": len(chart_files),
         })

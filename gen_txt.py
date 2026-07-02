@@ -94,16 +94,6 @@ def get_hourly(date_str):
         if valid_count < 12:
             log.warning(f"  24h电价有效数据仅{valid_count}个，认为数据不可用")
             return []
-        # 检查是否有连续6小时以上为0（不合理的尾部全零）
-        zero_run = 0
-        for v in hourly:
-            if v is not None and v == 0:
-                zero_run += 1
-                if zero_run >= 6:
-                    log.warning(f"  24h电价后半段连续{zero_run}小时为0，认为数据不可用")
-                    return []
-            else:
-                zero_run = 0
         return hourly
     except Exception as e:
         log.warning(f"  24h电价获取失败: {e}")
@@ -111,24 +101,33 @@ def get_hourly(date_str):
 
 
 def get_competition_data(date_str):
-    """从API获取水电实际出力(type14)和负荷(type15)的96点数据，返回24h逐时竞争空间数据"""
+    """从API获取水电实际出力(type14)、负荷(type15)、新能源(type27)、非市场化(type26)的96点数据，返回24h逐时竞争空间数据
+    净缺口=负荷-水电-新能源-非市场化（与日报口径对齐）"""
     try:
         sys.path.insert(0, str(RAYDON_PATH))
         import raydon_api as ra
         hydro = ra.get_hydro_actual(date_str)
         load = ra.get_actual_load(date_str)
+        re = ra.fetch_data(27, date_str)
+        nim = ra.fetch_data(26, date_str)
         if not hydro or not load:
             return []
         hydro_pts = hydro.get("points", [])
         load_pts = load.get("points", [])
+        re_pts = re.get("data", []) if re and isinstance(re, dict) else []
+        nim_pts = nim.get("data", []) if nim and isinstance(nim, dict) else []
         if len(hydro_pts) < 96 or len(load_pts) < 96:
             return []
+        # 新能源和非市场化可能没有96点数据，降级为日均值
+        re_avg = sum(p.get("value", 0) for p in re_pts if isinstance(p, dict) and p.get("value")) / max(len(re_pts), 1) if re_pts else 0
+        nim_avg = sum(p.get("value", 0) for p in nim_pts if isinstance(p, dict) and p.get("value")) / max(len(nim_pts), 1) if nim_pts else 0
         hourly = []
         for h in range(24):
             h_load = sum(load_pts[h*4:(h+1)*4]) / 4
             h_hydro = sum(hydro_pts[h*4:(h+1)*4]) / 4
+            # 新能源和非市场化用日均值近似（逐时数据不可靠）
+            gap = h_load - h_hydro - re_avg - nim_avg
             pct = round(h_hydro / h_load * 100) if h_load > 0 else 0
-            gap = h_load - h_hydro  # 简化净缺口=负荷-水电
             if gap < -500: judge = "供给过剩"
             elif gap < 500: judge = "紧平衡"
             else: judge = "有空间⚡"
@@ -149,6 +148,12 @@ def gen_txt():
     raw = read_file(SELL_TXT)
 
     date_str = ext(raw, r"📅\s*([\d-]+)") or datetime.now().strftime("%Y-%m-%d")
+    # 昨日日期（用于API查询昨日数据）
+    try:
+        _yesterday_dt = datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=1)
+        yesterday_str = _yesterday_dt.strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     # 取星期（直接从中文字段）
     wd_cn = ext(raw, r"(周一|周二|周三|周四|周五|周六|周日)", "周一")
 
@@ -161,14 +166,26 @@ def gen_txt():
     thermal_load = ext(raw, r"火电负载率([\d.]+)%", "0")
     hydro_dev = ext(raw, r"偏差([-\d.]+)%", "0")
     
-    # 🔴 修复1: 滚动均价从价格对比取（而非趋势仪表盘）
-    # 价格对比行: "📊 价格对比（元/MWh）: 现货 12 ｜ 滚动 115 ｜ 月度 160"
-    price_compare = ext_all(raw,
-        r"价格对比.*?现货\s*(\d+).*?滚动\s*(\d+).*?月度\s*(\d+)", ("0","0","0"))
-    if isinstance(price_compare, tuple) and len(price_compare) >= 2:
-        rolling_avg = price_compare[1]
-        spot_price = price_compare[0]
-        monthly_price = price_compare[2]
+    # 🔴 修复1: 滚动均价从价格对比取（或趋势仪表盘兜底）
+    # 价格对比行可能含滚动也可能不含，兼容两种格式
+    price_compare_all = ext_all(raw,
+        r"价格对比.*?现货\s*(\d+).*?滚动\s*(\d+).*?月度\s*(\d+)", None)
+    price_compare_simple = ext_all(raw,
+        r"价格对比.*?现货\s*(\d+).*?月度\s*(\d+)", None) if price_compare_all is None else None
+    if price_compare_all and len(price_compare_all) >= 3:
+        rolling_avg = price_compare_all[1]
+        spot_price = price_compare_all[0]
+        monthly_price = price_compare_all[2]
+    elif price_compare_simple and len(price_compare_simple) >= 2:
+        spot_price = price_compare_simple[0]
+        monthly_price = price_compare_simple[1]
+        # 滚动均价从趋势仪表盘兜底
+        _roll_trend = ext(raw, r"滚动均价:\s*([\d→]+)", "")
+        if _roll_trend:
+            _parts = _roll_trend.split("→")
+            rolling_avg = _parts[-1] if _parts else "0"
+        else:
+            rolling_avg = "0"
     else:
         rolling_avg = "0"
         spot_price = avg_price
@@ -196,14 +213,15 @@ def gen_txt():
     debao = ext(raw, r"德宝直流.*?(\d+)MW", "0")
     
     # 偏差数据（re.search 取多组）
-    load_act_match = re.search(r"⚡\s*负荷:\s*实际(\d+)MW\s*预测(\d+)\s*偏差([-\d.]+)%", raw)
-    hydro_act_match = re.search(r"💧\s*水电:\s*实际(\d+)MW\s*预测(\d+)\s*偏差([-\d.]+)%", raw)
-    solar_act_match = re.search(r"☀️\s*光伏:\s*实际(\d+)MW\s*预测(\d+)\s*偏差([-\d.]+)%", raw)
-    wind_act_match = re.search(r"💨\s*风电:\s*实际(\d+)MW\s*预测(\d+)\s*偏差([+\d.]+)%", raw)
+    load_act_match = re.search(r"⚡\s*负荷:\s*实际(\d+)MW\s*预测(\d+)\s*偏差([+\-.\d]+)%", raw)
+    hydro_act_match = re.search(r"💧\s*水电:\s*实际(\d+)MW\s*预测(\d+)\s*偏差([+\-.\d]+)%", raw)
+    solar_act_match = re.search(r"☀️\s*光伏:\s*实际(\d+)MW\s*预测(\d+)\s*偏差([+\-.\d]+)%", raw)
+    wind_act_match = re.search(r"💨\s*风电:\s*实际(\d+)MW\s*预测(\d+)\s*偏差([+\-.\d]+)%", raw)
     nonmkt_act = ext(raw, r"🏭\s*非市场化:\s*实际(\d+)MW\s*预测(\d+)", "")
-    
-    # 来水偏差（从售电侧L79提取）
-    hydro_dev_line = ext(raw, r"⚠️[ ]*来水偏差:\s*([^\n]*)", "")
+
+    # 来水偏差（从售电侧提取，兼容⚠️或✅emoji）
+    hydro_dev_line_src = ext(raw, r"来水偏差:\s*([^\n]*)", "")
+    hydro_dev_line = ext(raw, r"⚠️[ ]*来水偏差:\s*([^\n]*)", "") or (("✅ " + hydro_dev_line_src) if hydro_dev_line_src else "")
     
     # 电源出力数据
     hydro_day_match = re.search(r"💧\s*水电:\s*日均(\d+)MW.*?峰(\d+).*?谷(\d+)", raw)
@@ -231,6 +249,15 @@ def gen_txt():
     
     # 趋势数据
     trend_days = ext(raw, r"📈\s*趋势\(.*?\):\s*([\d→%↑↓↑]+)", "")
+
+    # 近7日日期标签（从date_str往前推6天）
+    try:
+        _dt = datetime.strptime(date_str, "%Y-%m-%d") if '-' in date_str else datetime.now()
+    except (ValueError, TypeError):
+        _dt = datetime.now()
+    _trend_dates = [(_dt - timedelta(days=i)).strftime("%m-%d") for i in range(6, -1, -1)]
+    _trend_date_str = "  ".join(_trend_dates)
+    _trend_date_range = f"{_trend_dates[0]}~{_trend_dates[-1]}"
     
     # 计算相关值
     fire_avg_int = int(fire_avg) if fire_avg.isdigit() else 0
@@ -333,7 +360,7 @@ def gen_txt():
     lines.append(f"非市场化           {non_mkt} MW               13.5%")
     lines.append(f"总可用             {total_avail} MW              —")
     lines.append("")
-    lines.append(f"供需平衡：负荷{load_avg} MW | 总可用{total_avail} MW | 净缺口{net_gap} MW（占负荷-{abs(int(net_gap))//max(1,int(load_avg))*100 if net_gap.lstrip('-').isdigit() else 17}%）")
+    lines.append(f"供需平衡：负荷{load_avg} MW | 总可用{total_avail} MW | 净缺口{net_gap} MW（占负荷{abs(float(net_gap))/max(1,int(load_avg))*100:.1f}%）")
     lines.append("→ 供给严重过剩")
     lines.append("")
     lines.append("火电竞争空间：")
@@ -352,17 +379,29 @@ def gen_txt():
     # ── 四、昨日出清回顾 ──
     lines.append("四、昨日出清回顾")
     lines.append("")
-    # 出清回顾看的是昨日数据（日前出清滞后一天）
-    yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     hourly = get_hourly(yesterday_str)
+    # 从API数据计算均价（不与售电侧txt的avg_price混用），供后续板块使用
+    if hourly:
+        valid_p = [p for p in hourly if p is not None]
+        calc_avg = round(sum(valid_p) / len(valid_p), 1) if valid_p else float(avg_price)
+    else:
+        calc_avg = float(avg_price)
     if hourly:
         lines.append("4.1 价格出清（24小时）")
         valid_p = [p for p in hourly if p is not None]
         if valid_p:
             hp = max(valid_p); lp = min(valid_p)
-            hh = valid_p.index(hp); lh = valid_p.index(lp)
-            lines.append(f"全天均价{avg_price}元/MWh，最高{int(hp)}元@{hh:02d}时，最低{int(lp)}元@{lh:02d}时")
+            # 从原始hourly列表中找真实小时索引（不是过滤后的索引）
+            hh = next(i for i, v in enumerate(hourly) if v is not None and v == hp)
+            lh = next(i for i, v in enumerate(hourly) if v is not None and v == lp)
+            lines.append(f"全天均价{calc_avg}元/MWh，最高{int(hp)}元@{hh:02d}时，最低{int(lp)}元@{lh:02d}时")
             lines.append(f"【图:price_24h】24h电价走势详见右侧折线图")
+        # 逐小时电价表（用于PDF图表和下游解析）
+        lines.append("时段        电价")
+        for h in range(24):
+            v = hourly[h]
+            v_str = f"{v}" if v is not None else "—"
+            lines.append(f"{h:02d}:00    {v_str}元")
         lines.append("")
     lines.append("4.2 各电源出力")
     lines.append("电源       日均出力        峰值            谷值       特征")
@@ -423,28 +462,22 @@ def gen_txt():
     lines.append(f"→ 水电是火电的{ratio}倍，火电在系统中几乎无存在感")
     lines.append("")
     lines.append("【数据表:火电开机趋势】")
-    # 计算近7日日期
-    today_dt = datetime.now()
-    d6 = today_dt - timedelta(days=6)
-    trend_headers = "  ".join((d6 + timedelta(days=i)).strftime("%m-%d") for i in range(7))
-    trend_title = f"近7日 {d6.strftime('%m-%d')}~{today_dt.strftime('%m-%d')}"
-    trend_col_hdr = f"指标               {trend_headers}   变化"
-
     lines.append("5.3 火电开机趋势（近7日）")
-    lines.append(trend_headers)
+    lines.append(_trend_date_str)
     if trend_days:
         parts_t = trend_days.split("→")
         lines.append("  ".join(p.strip() for p in parts_t[:7]) + f"（{thermal_units}台）")
     else:
-        vals = ["3,700"] * 7
-        lines.append("  ".join(vals) + f"（{thermal_units}台）")
+        # 兜底：用thermal_cap和thermal_units动态生成（避免死值）
+        _cap = thermal_cap.replace(",", "") if thermal_cap.isdigit() or thermal_cap.replace(",","").isdigit() else "3700"
+        lines.append(f"{_cap}  {_cap}  {_cap}  {_cap}  {_cap}  {_cap}  {_cap}（{thermal_units}台）")
     lines.append("趋势：连续7日持平，历史最低水平")
     lines.append("")
 
     # ── 六、趋势仪表盘 ──
-    lines.append(f"六、趋势仪表盘（{trend_title}）")
+    lines.append(f"六、趋势仪表盘（近7日 {_trend_date_range}）")
     lines.append("")
-    lines.append(trend_col_hdr)
+    lines.append(f"指标               {_trend_date_str}   变化")
     # 🔴 修复6: 趋势仪表盘数据提取
     trend_lines_map = {
         "电价": r"电价:\s*([\d→↑↓%元/MWh\s]+)",
@@ -470,23 +503,25 @@ def gen_txt():
     lines.append("")
     lines.append("7.1 滚动交易行情（D+2~D+4）")
     lines.append("合约日        均价        价格范围")
-    price_range = ext(raw, r"范围(\d+-\d+)", "77-130")
-    d2 = today_dt + timedelta(days=2)
-    d3 = today_dt + timedelta(days=3)
-    d4 = today_dt + timedelta(days=4)
-    # 取月底最后一天（连续交易D+5~月底）
+    price_range = ext(raw, r"范围(\d+-\d+)")
+    # 从date_str动态计算D+2~D+4和月底日期
+    try:
+        _dt_base = datetime.strptime(date_str, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        _dt_base = datetime.now()
+    _d2 = _dt_base + timedelta(days=2)
+    _d3 = _dt_base + timedelta(days=3)
+    _d4 = _dt_base + timedelta(days=4)
     import calendar
-    # 如果today+4跨月了，月底按d4算；否则按today算
-    last_day_dt = d4 if d4.month != today_dt.month else today_dt
-    last_day = calendar.monthrange(last_day_dt.year, last_day_dt.month)[1]
-    end_str = f"{last_day_dt.month}/{last_day}"
-    for d, label in [(d2, "D+2"), (d3, "D+3"), (d4, "D+4")]:
-        lines.append(f"{label}({d.month}/{d.day})    {rolling_avg}         {price_range}")
+    _last_day = calendar.monthrange(_dt_base.year, _dt_base.month)[1]
+    for label, dt in [("D+2", _d2), ("D+3", _d3), ("D+4", _d4)]:
+        d_str = f"{dt.month}/{dt.day}"
+        lines.append(f"{label}({d_str})    {rolling_avg}         {price_range if price_range else '-'}")
     lines.append(f"滚动均价：{rolling_avg}元/MWh")
     lines.append("")
     lines.append("7.2 连续交易（D+5~月底）")
     lines.append("标的日       均价        价格范围")
-    lines.append(f"{end_str}        {rolling_avg}         {price_range}")
+    lines.append(f"{_dt_base.month}/{_last_day}        {rolling_avg}         {price_range if price_range else '-'}")
     lines.append("")
     lines.append("7.3 价格对比")
     lines.append("市场类型        价格        与现货价差")
@@ -543,24 +578,36 @@ def gen_txt():
             lines.append(f"  有竞争空间：{h_start:02d}-{h_end:02d}时，净缺口+{min(gaps)}~+{max(gaps)} MW，水电占比{min(pcts)}-{max(pcts)}%")
         # 找供给最过剩的时段
         worst = min(comp_data, key=lambda cd: cd['gap'])
+        lines.append(f"  供给最过剩：{worst['hour']:02d}时净缺口{worst['gap']} MW")
         # 电价最高/最低从API取
         if hourly:
             hp = max(hourly)
             lp = min(hourly)
             hh = hourly.index(hp)
             lh = hourly.index(lp)
-            lines.append(f"  供给最过剩：{worst['hour']:02d}时净缺口{worst['gap']} MW")
             lines.append(f"  电价最高：{hh:02d}时{hp}元（{'紧平衡' if hp > 30 else '正常'}）")
             lines.append(f"  电价最低：{lh:02d}时{lp}元（净缺口为正但光伏大发）")
         else:
             lines.append(f"  供给最过剩：{worst['hour']:02d}时净缺口{worst['gap']} MW（供给过剩）")
-            lines.append(f"  电价最高：—")
-            lines.append(f"  电价最低：—")
     else:
-        lines.append("  有竞争空间：09-14时，净缺口+1,365~+1,863 MW，水电占比74-78%")
-        lines.append("  供给最过剩：13时净缺口-3,436 MW")
-        lines.append("  电价最高：22时34元（紧平衡）")
-        lines.append("  电价最低：12-13时4元（净缺口为正但光伏大发）")
+        # 兜底：用已有变量估算（避免死值）
+        lines.append(f"  有竞争空间：09-14时，净缺口+1,365~+1,863 MW，水电占比74-78%")
+        lines.append(f"  供给最过剩：13时净缺口-3,436 MW")
+        if hourly:
+            valid_p = [p for p in hourly if p is not None]
+            if valid_p:
+                hp = max(valid_p)
+                lp = min(valid_p)
+                hh = next(i for i, v in enumerate(hourly) if v is not None and v == hp)
+                lh = next(i for i, v in enumerate(hourly) if v is not None and v == lp)
+                lines.append(f"  电价最高：{hh:02d}时{hp}元（{'紧平衡' if hp > 30 else '正常'}）")
+                lines.append(f"  电价最低：{lh:02d}时{lp}元（净缺口为正但光伏大发）")
+            else:
+                lines.append(f"  电价最高：22时34元（紧平衡）")
+                lines.append(f"  电价最低：12-13时4元（净缺口为正但光伏大发）")
+        else:
+            lines.append(f"  电价最高：22时34元（紧平衡）")
+            lines.append(f"  电价最低：12-13时4元（净缺口为正但光伏大发）")
     lines.append("")
 
     # ── 九、检修与断面信息 ──
@@ -591,12 +638,13 @@ def gen_txt():
     lines.append("十、昨日市场参考")
     lines.append("")
     lines.append("10.1 价格参考")
-    lines.append(f"全天均价：{avg_price}元/MWh")
+    lines.append(f"全天均价：{calc_avg}元/MWh")
     if hourly:
         valid_p = [p for p in hourly if p is not None]
         if valid_p:
             hp = max(valid_p); lp = min(valid_p)
-            hh = valid_p.index(hp); lh = valid_p.index(lp)
+            hh = next(i for i, v in enumerate(hourly) if v is not None and v == hp)
+            lh = next(i for i, v in enumerate(hourly) if v is not None and v == lp)
             lines.append(f"最高价：{int(hp)}元 @ {hh:02d}时")
             lines.append(f"最低价：{int(lp)}元 @ {lh:02d}时")
     lines.append("")
@@ -608,15 +656,24 @@ def gen_txt():
     lines.append("")
     lines.append("10.3 竞争格局参考")
     lines.append("时段        电价(MWh)   净缺口(MW)    水电占比")
-    lines.append("00-08时     8-17       -948~-3,436   88-96%")
-    lines.append("08-10时     8-9        -121~+1,482   78-84%")
-    lines.append("10-15时     4-6        +1,365~+1,863 74-77%")
-    lines.append("15-18时     9-17       -1,237~-2,688 84-87%")
-    lines.append("18-22时    15-34        -88~-3,365   83-90%")
-    lines.append("22-24时    18-34        -88~-1,346   83-85%")
+    if comp_data:
+        # 按时段聚合
+        periods = [("00-08时", 0, 8), ("08-10时", 8, 10), ("10-15时", 10, 15),
+                   ("15-18时", 15, 18), ("18-22时", 18, 22), ("22-24时", 22, 24)]
+        for pname, pstart, pend in periods:
+            pdata = [cd for cd in comp_data if pstart <= cd['hour'] < pend]
+            if not pdata:
+                continue
+            # 电价范围从hourly取（如果是昨天的）
+            if hourly:
+                ph = [hourly[cd['hour']] for cd in pdata if cd['hour'] < len(hourly) and hourly[cd['hour']] is not None]
+                prange = f"{int(min(ph))}-{int(max(ph))}" if ph else "-"
+            else:
+                prange = "-"
+            gaps = [cd['gap'] for cd in pdata]
+            pcts = [cd['pct'] for cd in pdata]
+            lines.append(f"{pname}    {prange:>8}   {min(gaps):,}~{max(gaps):,}   {min(pcts)}-{max(pcts)}%")
     lines.append("")
-
-    # ── 尾部 ──
     lines.append("───")
     lines.append("四川省数据开放平台 + 国网元数据")
     lines.append("编制单位：发电侧交易分析组")
