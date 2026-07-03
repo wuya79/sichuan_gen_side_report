@@ -1,0 +1,45 @@
+# 数字资产清单
+
+## 四川燃煤电厂发电侧交易日报系统
+
+### 代码仓库
+- **路径**: `~/sichuan_gen_side_report/`
+- **提交**: `e3378fc feat: 四川燃煤电厂发电侧交易日报系统 v1.0`
+- **文件统计**: 4 files, 1319 lines
+
+### 核心文件
+| 文件 | 行数 | 功能描述 |
+|------|------|----------|
+| gen_txt.py | 600 | 从售电侧txt提取10板块数据+API补齐24h电价 |
+| generate_pdf.py | 700 | Kimi生成HTML + 4张matplotlib图表 + weasyprint转PDF + 后处理注入 |
+
+### 运行文件
+- **脚本目录**: `~/.hermes/scripts/gen_side/`
+- **售电侧数据源**: `/var/www/reports/daily_latest.txt`
+- **发电侧TXT输出**: `/var/www/reports/gen_side_latest.txt`
+- **发电侧PDF输出**: `/var/www/reports/gen_side/gen_side_latest.pdf`
+- **带日期PDF**: `/var/www/reports/gen_side/gen_side_YYYYMMDD.pdf`
+- **CSS样式**: `~/.hermes/scripts/gen_side/assets/report.css`
+- **Kimi API Key**: `~/.hermes/scripts/gen_side/.kimi_key`
+- **临时文件**: `/tmp/hermes_gen_side_pdf/charts/`
+- **日志**: `~/.hermes/logs/gen_side_txt.log` / `gen_side_pdf.log`
+
+### 公网URL
+- **PDF**: http://118.24.77.156:18080/reports/gen_side/gen_side_latest.pdf
+- **TXT**: http://118.24.77.156:18080/reports/gen_side_latest.txt
+
+### 定时任务
+- **cron ID**: `6714b3433f9a`
+- **调度**: `50 9 * * *`（每日09:50）
+- **超时**: 720秒
+- **依赖链**: 售电侧txt 09:30 → 售电侧PDF 09:42 → 发电侧 09:50
+
+### 依赖
+- Python 3.11
+- Kimi API (moonshot-v1-128k)
+- raydon_api（四川电力数据API封装，`~/sichuan_hydro_price/`）
+- weasyprint + matplotlib + pandas
+
+### Skill
+- **名称**: `sichuan-gen-side-daily-report`
+- **路径**: `~/.hermes/skills/sichuan-power-rules/sichuan-gen-side-daily-report/`
