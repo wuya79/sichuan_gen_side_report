@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Push local repo to GitHub via REST API (branches: master or main)."""
-import json, subprocess, urllib.request
+import base64, json, subprocess, urllib.request
 
 TOKEN = open("/home/ubuntu/.hermes/keys/GITHUB_TOKEN").read().strip()
 CWD = None  # 在终端中设 CWD=仓库目录
@@ -63,19 +63,20 @@ for p in list(changed.keys())[:10]:
 if changed:
     print(f"\n=== Step 5: Upload {len(changed)} blobs ===")
     for i, (path, sha) in enumerate(changed.items()):
-        content = sh(f"git cat-file -p {sha}")
-        if not content:
+        raw = subprocess.run(f"git cat-file -p {sha}", capture_output=True, shell=True, cwd=CWD).stdout
+        if not raw:
             print(f"  skip empty: {path}")
             continue
         try:
-            api("POST", "git/blobs", {"content": content, "encoding": "utf-8"})
-        except Exception:
-            pass
+            text = raw.decode("utf-8")
+            api("POST", "git/blobs", {"content": text, "encoding": "utf-8"})
+        except UnicodeDecodeError:
+            b64 = base64.b64encode(raw).decode()
+            api("POST", "git/blobs", {"content": b64, "encoding": "base64"})
         if (i+1) % 30 == 0:
-            print(f"  {i+1}/{len(changed)} done")
-    print(f"  done: {len(changed)} blobs")
+            print(f"  {i+1}/{len(changed)}")
 else:
-    print("\n=== Step 5: 无blobs需上传 ===")
+    print("\n=== Step 5: 无变化 ===")
 
 # Step 6
 print("\n=== Step 6: Build tree ===")
