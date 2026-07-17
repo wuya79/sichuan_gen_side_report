@@ -1,6 +1,8 @@
-gen_side/*.pdf
-__pycache__/
 *.pyc
+__pycache__/
 .kimi_key
-assets/
-.*.swp
+.last_success.pdf
+设计文档*.md
+README.md
+gen_side_latest.pdf
+gen_side_latest.txt

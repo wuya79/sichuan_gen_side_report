@@ -1,113 +1,47 @@
 # 开发日志
 
-## 2026-06-29
+## 2026-07-04
 
 ### 今日工作
 
-#### 1. 发电侧日报系统搭建（v1.0）
+#### 1. 发电侧日报PDF — Chart 2数据源改造（type=2真实逐时数据）
 
-- **背景**: 从零搭建四川燃煤电厂发电侧交易日报系统，与售电侧日报完全解耦
+- **背景**: Chart 2（各电源出力堆叠图）之前水电全天34666MW硬编码、光伏风电用固定模板，不反映当日实际数据，会误导读者。
+- **改动**: 
+  - 改为优先从type=2 API取昨日水电/火电/光伏/风电的96点实际数据，聚合为24小时画stackplot
+  - 三级兜底机制：type=2 API → txt板块八提取水电逐时数据 → 硬编码fallback
+  - 只画有数据的图层（API没返回光伏/风电就不画，避免臆想）
+  - 修复了type=2返回值为str类型导致的 `>=` 类型比较错误
+- **文件**: `generate_pdf.py`, `gen_side_ds_pdf.py`
+- **状态**: ✅ 完成
+
+#### 2. 发电侧日报PDF — Chart 3重写为三轴叠加趋势图
+
+- **背景**: Chart 3（7日趋势）之前三个子图，净缺口只有今天一个值画7天水平线，毫无意义。
 - **改动**:
-  - 创建独立项目目录 `/home/ubuntu/.hermes/scripts/gen_side/`
-  - `gen_txt.py`（600行）：从售电侧txt提取10个板块数据，调API补齐24h电价，输出发电侧专用txt
-  - `generate_pdf.py`（700行）：Kimi API生成HTML + 4张matplotlib图表 + weasyprint转PDF
-  - 后处理器 `inject_supplement_tables()`：注入7张缺失表格（天气前瞻×3、昨日偏差、来水偏差、系统备用、火电开机趋势）
-  - 分析框替换器 `_fix_market_analysis()`：消除重复时段分解，替换为"市场综合研判"
-- **产出**:
-  - PDF: http://118.24.77.156:18080/reports/gen_side/gen_side_latest.pdf（25张表，4张图，561KB，12页）
-  - TXT: http://118.24.77.156:18080/reports/gen_side_latest.txt（7371字符，10板块）
+  - 仿售电侧日报的三轴叠加图：电价（左轴蓝线）+ 水电占比（右轴绿线）+ 负荷（右轴偏移橙线，单位GW）
+  - 去掉净缺口子图（无历史数据）
+  - 数据从txt趋势行解析（电价/水电占比/负荷均有7天真实数据）
+  - `parse_report_data`新增负荷7日趋势解析（trend_loads）
+- **文件**: `generate_pdf.py`, `gen_side_ds_pdf.py`
 - **状态**: ✅ 完成
 
-#### 2. 全维度审计与修复
+#### 3. 发电侧日报PDF — 后处理修复price_24h重复引用
 
-- **审计范围**: 正则匹配、emoji影响、硬编码、取值过滤、板块完整性、代码bug、设计缺陷/鲁棒性共计7个维度
-- **发现并修复的问题**:
-  | # | 问题 | 严重度 | 修复 |
-  |---|---|---|---|
-  | 1 | `clear_dev`正则不匹配"日前36373MW vs 日内37058MW" | 🔴 | 加"日前"/"日内"后缀 |
-  | 2 | `basin_line`/`trend_line`缺`re.MULTILINE`→永远为空 | 🟡 | ext()加flags参数 |
-  | 3 | Chart 4竞争空间数据硬编码 | 🔴 | 从API获取+fallback |
-  | 4 | Chart 3趋势标签硬编码`['06-23',...]` | 🔴 | 从txt解析日期范围动态生成 |
-  | 5 | 竞争空间静态结论4行固定文本 | 🟡 | 从comp_data动态生成+fallback |
-  | 6 | 火电开机趋势前缀"5.3"残留 | 🟡 | 加固正则去重 |
-  | 7 | 售电侧txt不存在无友好报错 | 🟢 | SELL_TXT.exists()检查 |
-  | 8 | inject_supplement_tables空值无检查 | 🟢 | if not raw or not html: return |
-- **状态**: ✅ 全部修复完成
-
-#### 3. Git仓库创建
-
-- **位置**: `~/sichuan_gen_side_report/`
-- **文件**: gen_txt.py (600行) + generate_pdf.py (700行) + README.md + .gitignore
-- **提交**: `feat: 四川燃煤电厂发电侧交易日报系统 v1.0`
-- **状态**: ✅ 完成
-
-#### 4. Cron定时任务配置
-
-- **时间**: 每日09:50自动运行
-- **依赖链**: 09:30售电侧txt → 09:42售电侧PDF → 09:50发电侧
-- **超时**: 720秒（12分钟）
-- **周六冲突**: 周报10:00发电侧09:50→10分钟间隔→不冲突
-- **安全**: 两步依赖（gen_txt.py失败则停止）、PID并发锁、Kimi重试机制
-- **状态**: ✅ 完成
+- **背景**: Kimi生成的HTML中把price_24h.png（24h电价走势图）重复放到板块三和板块四，PDF里出现两次同一张图。
+- **改动**:
+  - Prompt层：4张图的引用位置全部显式列出（板块四price_24h、板块五output_stack、板块七trend_7d、板块九competition），并强调"必须全部引用，不能重复遗漏"
+  - 后处理层：新增`_remove_orphan_price_chart()`函数，按section id关键词匹配板块四，删除其之前的所有price_24h引用
+  - 后处理连`<figure>`一起删除（不残留空白块）
+  - 修复了<figure>扩展窗口30字符不够大的问题（改成80），以及at_figure判断分支
+- **文件**: `generate_pdf.py`, `gen_side_ds_pdf.py`
+- **状态**: ✅ 完成（已通过6个单元测试+真实HTML验证）
 
 ### 待办事项
 
-- [x] 验证明天09:50第一次cron自动执行
-- [ ] Chart 2出力堆叠图的solar/wind数组也可考虑从API动态获取（当前为经验估算）
+- [ ] 明天cron跑完后验证新版Chart 2/Chart 3在PDF中的效果
+- [ ] 观察Kimi是否会按要求引用全部4张图（prompt改进后的效果）
 
 ### 备注
 
-- 项目代码在 `~/sichuan_gen_side_report/`（独立仓库），运行文件在 `~/.hermes/scripts/gen_side/`
-- 售电侧日报不受任何影响（零依赖、零写入）
-- PDF生成瓶颈在Kimi API（~88秒），weasyprint约2秒，matplotlib约1秒
-
----
-
-## 2026-07-02
-
-### 今日工作
-
-#### 1. 发电侧日报五维度审计与修复
-
-- **审计范围**: API日期传错、提示词硬编码、设计缺陷/逻辑错误、数据耦合/臆想、其他问题共计5个维度21个问题
-- **最严重问题（已全部修复）**:
-  | # | 问题 | 严重度 | 修复方式 |
-  |:-:|------|:------:|:---------|
-  | 1-5 | 5处API日期传today而非yesterday | 🔴 | 改为yesterday_str |
-  | 6-8 | 3处提示词硬编码臆想值"最高190元@12时"等 | 🔴 | 删除死值，改为data动态引用 |
-  | 9 | 均价混源（txt均价vs API最高最低） | 🔴 | calc_avg优先用API计算 |
-  | 10 | 最高最低小时索引错位（filter后index偏移） | 🔴 | 改为enumerate+next遍历原始列表 |
-  | 12-13 | 竞争格局参考数据写死 | 🟡 | comp_data每日API拉取，兜底几乎不触发 |
-  | 14 | price_range默认值"77-130" | 🟡 | 已删除默认值 |
-  | 20 | generate_pdf正则匹配不到逐小时行 | 🟡 | gen_txt已输出逐小时电价表 |
-  | 21 | spot/monthly始终死值12/160 | 🟡 | 改为从txt正则提取 |
-  | 11 | 火电开机趋势兜底写死7个3700 | 🟢 | 改为动态用thermal_cap+thermal_units生成 |
-
-- **最终结论**: 所有问题已全部修复，无需再做修改
-
-#### 2. PDF输出URL改为带日期文件名
-
-- **背景**: 用户要求所有日报链接使用带日期的文件名而非latest软链接
-- **改动**:
-  - `generate_pdf.py` L685-686: pdf_url/txt_url从`latest`改为`date_short`格式（YYYYMMDD）
-  - `pdf_report_generator.py` L513: pdf_url从`latest`改为`dated_name`格式（YYYYMMDD）
-- **Cron更新**:
-  - 售电PDF生成（09:42）: prompt改写为使用source加载.env
-  - 售电推送企微（09:45）: 改为从txt提取日期构造URL，不再写死latest
-  - 发电PDF生成（09:50）: 直接用脚本输出的日期URL
-- **验证**: 三个cron全部实际运行测试通过 ✅
-- **Git提交**:
-  - `sichuan_gen_side_report`: `0629fdd5` `fix: 发电侧日报API日期修正+输出URL改为带日期文件名`
-  - `sichuan_daily_report_pdf`: `a61defa1` `fix: 售电侧日报PDF输出URL改为带日期文件名`
-- **状态**: ✅ 完成
-
-### 待办事项
-
-- [ ] Chart 2出力堆叠图的solar/wind数组可考虑从API动态获取（当前为经验估算）
-- [x] ~~验证明天09:50第一次cron自动执行~~（已验证通过）
-
-### 备注
-
-- PDF链接格式统一: `daily_YYYYMMDD.pdf` / `gen_side_YYYYMMDD.pdf`
-- latest软链接保留向后兼容，但cron推送均使用带日期文件名
-- 所有改动已commit并通过REST API推送到GitHub
+Chart 3的净缺口历史数据缺失——`daily_trends.json`中没有归档net_gap。未来如果有需要，可以在售电侧日报的数据归档逻辑中加net_gap字段，慢慢积累后可以恢复净缺口子图。
