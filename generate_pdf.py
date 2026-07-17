@@ -13,7 +13,7 @@ Cron:
     10:00
 """
 
-import os, sys, re, json, logging, traceback
+import os, sys, re, json, time, logging, traceback
 from pathlib import Path
 from datetime import datetime, timedelta
 import matplotlib
@@ -30,8 +30,11 @@ LOG_FILE = os.path.expanduser("~/.hermes/logs/gen_side_pdf.log")
 GEN_TXT = Path(NGINX_DIR) / "gen_side_latest.txt"
 SELL_TXT = Path(NGINX_DIR) / "daily_latest.txt"
 CSS_PATH = ASSETS_DIR / "report.css"
-KIMI_BASE_URL = "https://api.moonshot.cn/v1"
-KIMI_MODEL = "moonshot-v1-128k"
+KIMI_BASE_URL_OPEN = "https://api.moonshot.cn/v1"
+KIMI_MODEL_OPEN = "moonshot-v1-128k"
+# Kimi Code Plan（备用）
+KIMI_BASE_URL_CODE = "https://api.kimi.com/coding/v1"
+KIMI_MODEL_CODE = "moonshot-v1-128k"
 RAYDON_PATH = Path(os.path.expanduser("~/sichuan_hydro_price"))
 PID_FILE = Path("/tmp/gen_side_pdf.pid")
 
@@ -41,28 +44,56 @@ logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(message)s",
 log = logging.getLogger("gen_side_pdf")
 
 
-def load_kimi_key():
-    # 优先环境变量，fallback到文件
-    env_key = os.getenv("KIMI_API_KEY", "").strip()
-    if env_key:
-        return env_key
-    kf = SCRIPT_DIR / ".kimi_key"
-    if kf.exists():
-        return kf.read_text(encoding="utf-8").strip()
-    raise FileNotFoundError(f"Kimi Key不存在: 请设置KIMI_API_KEY环境变量或创建 {kf}")
+def load_kimi_keys():
+    """返回 (api_key_open, api_key_code)。open=开放平台主key，code=Code Plan备用key。"""
+    key_open = os.getenv("KIMI_API_KEY_OPEN", "").strip()
+    key_code = os.getenv("KIMI_API_KEY", "").strip()
+    # fallback: 从 .kimi_key 文件读（仅开放平台key）
+    if not key_open:
+        kf = SCRIPT_DIR / ".kimi_key"
+        if kf.exists():
+            key_open = kf.read_text(encoding="utf-8").strip()
+    return key_open, key_code
 
 
-def kimi_call(api_key, system, user, timeout=600, max_tokens=100000):
+def kimi_call_with_fallback(api_key_open, api_key_code, system, user, timeout=600, max_tokens=100000):
+    """优先 Kimi 开放平台。触发 429/5xx/超时 → 自动切 Kimi Code Plan。"""
     import openai, httpx
-    hc = httpx.Client(timeout=httpx.Timeout(timeout, connect=10, read=timeout, write=10))
-    cl = openai.OpenAI(api_key=api_key, base_url=KIMI_BASE_URL, http_client=hc, max_retries=0)
-    r = cl.chat.completions.create(model=KIMI_MODEL,
-        messages=[{"role":"system","content":system},{"role":"user","content":user}],
-        temperature=0.2, max_tokens=max_tokens)
-    return r.choices[0].message.content
+
+    msgs = [{"role":"system","content":system}, {"role":"user","content":user}]
+
+    def _call(key, base, model, temp):
+        hc = httpx.Client(timeout=httpx.Timeout(timeout, connect=10, read=timeout, write=10))
+        cl = openai.OpenAI(api_key=key, base_url=base, http_client=hc, max_retries=0)
+        r = cl.chat.completions.create(model=model, messages=msgs, temperature=temp, max_tokens=max_tokens)
+        return r.choices[0].message.content
+
+    # 主平台
+    try:
+        log.info("[PRIMARY] Kimi开放平台...")
+        result = _call(api_key_open, KIMI_BASE_URL_OPEN, KIMI_MODEL_OPEN, 0.2)
+        log.info("[PRIMARY] ✅")
+        return result
+    except (openai.RateLimitError, openai.InternalServerError,
+            openai.APITimeoutError, openai.APIConnectionError,
+            openai.APIStatusError) as e:
+        log.warning(f"[PRIMARY] ⚠️ {type(e).__name__}，切换到 Code Plan...")
+        if not api_key_code:
+            raise RuntimeError(f"开放平台{type(e).__name__}，但 Code Plan key 未配置，无法切换") from e
+
+    log.info("[FALLBACK] Kimi Code Plan...")
+    result = _call(api_key_code, KIMI_BASE_URL_CODE, KIMI_MODEL_CODE, 1)
+    log.info("[FALLBACK] ✅")
+    return result
 
 
 def extract_html(raw):
+    """从Kimi返回内容中提取HTML。"""
+    # 检测nginx错误页面
+    if "<title>50" in raw and "Gateway" in raw:
+        raise RuntimeError(f"API返回网关错误: {raw[:200]}")
+    if "<title>40" in raw and "Error" in raw:
+        raise RuntimeError(f"API返回HTTP错误: {raw[:200]}")
     if "```html" in raw:
         m = re.search(r"```html\s*([\s\S]*?)```", raw)
         if m: return m.group(1)
@@ -582,13 +613,23 @@ def _fix_market_analysis(html, report_text):
 # ─── 主流程 ─────────────────────────────────────────────────
 
 
-def generate_pdf(api_key):
-    # 并发锁
+def generate_pdf(api_key_open, api_key_code):
+    # 并发锁（30分钟超时，防止僵尸PID卡死）
     if PID_FILE.exists():
-        pid = PID_FILE.read_text().strip()
-        if os.path.exists(f"/proc/{pid}"):
-            log.warning(f"  上次进程({pid})仍在运行，退出")
-            return {"success": False, "error": f"上次进程({pid})仍在运行"}
+        try:
+            pid = PID_FILE.read_text().strip()
+            mtime = PID_FILE.stat().st_mtime
+            if time.time() - mtime > 1800:  # 30分钟超时
+                log.warning(f"  PID文件超过30分钟，清理僵尸锁")
+                PID_FILE.unlink()
+            elif os.path.exists(f"/proc/{pid}"):
+                log.warning(f"  上次进程({pid})仍在运行，退出")
+                return {"success": False, "error": f"上次进程({pid})仍在运行"}
+            else:
+                log.warning(f"  进程{pid}已不存在，清理残留PID文件")
+                PID_FILE.unlink()
+        except (ValueError, FileNotFoundError):
+            PID_FILE.unlink(missing_ok=True)
     PID_FILE.write_text(str(os.getpid()))
     result = {"success": False, "error": ""}
     log.info("="*50)
@@ -627,12 +668,12 @@ def generate_pdf(api_key):
         log.info("Step 3: 调用Kimi生成HTML...")
         system, user = build_prompt(report_text, chart_refs)
         
-        raw = kimi_call(api_key, system, user, timeout=600, max_tokens=100000)
+        raw = kimi_call_with_fallback(api_key_open, api_key_code, system, user, timeout=600, max_tokens=100000)
         html = extract_html(raw)
         
         if not check_html(html):
             log.warning("  HTML不完整，重试...")
-            raw2 = kimi_call(api_key, system,
+            raw2 = kimi_call_with_fallback(api_key_open, api_key_code, system,
                 user + "\n\n【重要】上次输出不完整，请输出完整HTML包含全部10个section。",
                 timeout=600, max_tokens=100000)
             html2 = extract_html(raw2)
@@ -703,8 +744,14 @@ def generate_pdf(api_key):
 
 
 def main():
-    api_key = load_kimi_key()
-    result = generate_pdf(api_key)
+    api_key_open, api_key_code = load_kimi_keys()
+    if not api_key_open:
+        log.error("Kimi Key未配置: 请设置 KIMI_API_KEY_OPEN 环境变量或 .kimi_key 文件")
+        sys.exit(1)
+    if not api_key_code:
+        log.error("Kimi Code Plan key 未配置: 请设置 KIMI_API_KEY 环境变量")
+        sys.exit(1)
+    result = generate_pdf(api_key_open, api_key_code)
     if result["success"]:
         print(f"\n✓ 成功")
         print(f"  PDF: {result['pdf_url']}")
