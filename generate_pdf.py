@@ -812,7 +812,7 @@ def main():
         if result.get("date"):
             date_short = result["date"].replace("-", "")
             local_pdf = f"/var/www/reports/gen_side/gen_side_{date_short}.pdf"
-            oss_key = f"gen-daily-report/daily_{date_short}.pdf"
+            oss_key = f"gen-daily-report/gen_side_{date_short}.pdf"
             oss_result = upload_to_oss(local_pdf, oss_key)
             result["oss_ok"] = oss_result["ok"]
             if oss_result["ok"]:
