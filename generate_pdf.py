@@ -610,6 +610,56 @@ def _fix_market_analysis(html, report_text):
     return html[:box_start] + new_box + html[box_end:]
 
 
+# ─── OSS 上传（阿里云对象存储） ────────────────────────────
+
+def upload_to_oss(local_path: str, oss_key: str,
+                  max_retries: int = 3) -> dict:
+    """
+    上传文件到阿里云 OSS，作为下游系统的交付通道。
+    返回: {"ok": True, "url": "..."} 或 {"ok": False, "error": "..."}
+    重试: 3次，间隔 0s / 5s / 15s。失败不抛异常。
+    """
+    access_key_id = os.environ.get("OSS_ACCESS_KEY_ID", "")
+    access_key_secret = os.environ.get("OSS_ACCESS_KEY_SECRET", "")
+    bucket_name = os.environ.get("OSS_BUCKET", "sc-power-trade")
+    endpoint = os.environ.get("OSS_ENDPOINT", "oss-cn-chengdu.aliyuncs.com")
+
+    if not access_key_id or not access_key_secret:
+        return {"ok": False, "error": "credentials not configured"}
+    if not os.path.exists(local_path):
+        return {"ok": False, "error": f"file not found: {local_path}"}
+
+    try:
+        import oss2
+    except ImportError:
+        return {"ok": False, "error": "oss2 SDK not installed"}
+
+    auth = oss2.Auth(access_key_id, access_key_secret)
+    bucket = oss2.Bucket(auth, endpoint, bucket_name, connect_timeout=10)
+
+    last_error = ""
+    for attempt in range(max_retries):
+        try:
+            bucket.put_object_from_file(oss_key, local_path)
+            url = f"https://{bucket_name}.{endpoint}/{oss_key}"
+            log.info(f"  OSS 上传成功: {url}")
+            return {"ok": True, "url": url}
+        except oss2.exceptions.NoSuchBucket:
+            return {"ok": False, "error": f"bucket not found: {bucket_name}"}
+        except oss2.exceptions.AccessDenied:
+            return {"ok": False, "error": "access denied (check AK/SK permissions)"}
+        except Exception as e:
+            last_error = str(e)
+            if attempt < max_retries - 1:
+                wait = [0, 5, 15][attempt]
+                log.warning(f"  OSS 上传失败 (attempt {attempt+1}/{max_retries}): {last_error}，{wait}s 后重试")
+                time.sleep(wait)
+            else:
+                log.error(f"  OSS 上传最终失败 ({max_retries} attempts): {last_error}")
+
+    return {"ok": False, "error": last_error}
+
+
 # ─── 主流程 ─────────────────────────────────────────────────
 
 
@@ -757,6 +807,19 @@ def main():
         print(f"  PDF: {result['pdf_url']}")
         print(f"  TXT: {result['txt_url']}")
         print(f"  表格: {result.get('tables',0)}张, 图表: {result.get('charts',0)}张")
+
+        # OSS 上传（下游系统交付通道）
+        if result.get("date"):
+            date_short = result["date"].replace("-", "")
+            local_pdf = f"/var/www/reports/gen_side/gen_side_{date_short}.pdf"
+            oss_key = f"gen-daily-report/daily_{date_short}.pdf"
+            oss_result = upload_to_oss(local_pdf, oss_key)
+            result["oss_ok"] = oss_result["ok"]
+            if oss_result["ok"]:
+                result["oss_url"] = oss_result["url"]
+            else:
+                result["oss_error"] = oss_result["error"]
+                log.error(f"  OSS 上传失败: {oss_result['error']}")
     else:
         print(f"\n✗ 失败: {result['error']}")
         sys.exit(1)
