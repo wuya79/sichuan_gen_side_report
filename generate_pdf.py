@@ -350,8 +350,22 @@ def gen_charts(data, charts_dir, date_str=None):
 # ─── 构建Prompt ─────────────────────────────────────────────
 
 
-def build_prompt(report_text, chart_refs):
+def build_prompt(report_text, chart_files):
     css = CSS_PATH.read_text(encoding="utf-8") if CSS_PATH.exists() else ""
+    
+    # 动态构建图表指令（只列实际生成成功的图表，避免Kimi引用不存在的文件）
+    _chart_map = {
+        "price_24h.png": "板块四（出清回顾）",
+        "output_stack.png": "板块五（火电复盘）",
+        "trend_7d.png": "板块六（趋势仪表盘）",
+        "competition.png": "板块八（竞争空间）",
+    }
+    generated_names = [f.name for f in chart_files]
+    chart_list = []
+    for n in generated_names:
+        if n in _chart_map:
+            chart_list.append(f"   - {_chart_map[n]}: charts/{n}")
+    chart_instructions = "\n".join(chart_list) if chart_list else "（无可用图表）"
     
     system = f"""你是专业的燃煤电厂发电侧运营分析师。将原始数据转换为面向电厂领导的发电侧日报完整HTML。
 
@@ -362,7 +376,9 @@ def build_prompt(report_text, chart_refs):
 4. 每个section结尾必须有<div class="analysis-box"><p>分析内容</p></div>
 5. 所有单元格填入实际数据，禁止"--"
 6. 每个section的标题用<h2>标签
-7. 图表引用格式：<figure><img src="charts/xxx.png"><figcaption data-label="图X">标题</figcaption></figure>
+7. 图表引用格式：<figure><img src="charts/图表名.png"><figcaption data-label="图X">标题</figcaption></figure>
+8. 【硬约束】只能使用以下图表文件，禁止编造新的文件名。每个图表必须放在指定section中：
+{chart_instructions}
 
 【CSS样式】
 {css}
@@ -384,11 +400,12 @@ def build_prompt(report_text, chart_refs):
 
 【核心设计原则 - 表格精简】
 - 4.1 价格出清（24小时）：必须引用图表 <img src="charts/price_24h.png">，下方只展示最高/最低/均价3行摘要，从图表和数据中提取实际值展示，不要臆想数值
-- 5.1 火电24小时出力：可引用图表 <img src="charts/output_stack.png"> 展示各电源出力对比，火电部分用一段总结说明，绝对不要输出24行的逐小时出力表
+- 5.1 火电24小时出力：必须引用图表 <img src="charts/output_stack.png"> 展示各电源出力对比，火电部分用一段总结说明，绝对不要输出24行的逐小时出力表
+- 6.1 趋势仪表盘（近7日）：必须引用图表 <img src="charts/trend_7d.png">，下方只展示趋势研判分析，不要逐条复述数据
+- 8.1 竞争空间（逐时水电占比）：必须引用图表 <img src="charts/competition.png">，下方用一段总结代替24行逐时表，聚焦竞争窗口分析
 - 其余表格正常生成，保持25张以上的目标
 【重要标记说明】
 数据中出现的 `【数据表:xxx】` 标记（如【数据表:天气前瞻】、【数据表:系统备用】、【数据表:来水偏差】、【数据表:昨日偏差】、【数据表:火电开机趋势】）后面的内容必须做成独立表格展示，不能只写在分析框文字里。
-{chart_refs}
 
 参考风格：
 【核心研判】丰水期深跌格局持续。水电占比高位满发运行，供给严重过剩。火电开机连续多日持平历史最低，日均出力极低。现货均价维持在低位，但月内滚动均价较现货大幅升水，反映远期市场对枯水期价格回升的预期。
@@ -401,7 +418,8 @@ def build_prompt(report_text, chart_refs):
 1. 输出必须是完整HTML（从<!DOCTYPE html>到</html>），不要Markdown代码块
 2. 包含封面、目录、全部10个section，总表格≥25张
 3. 每个section结尾必须有分析框，字数达标、禁止复述表格数据、必须有指导意见
-4. 在对应section中引用图表：<img src="charts/xxx.png">
+4. 在对应section中引用以下图表（禁止使用其他文件名）：
+{chart_instructions}
 5. 所有单元格填入实际数据
 
 【数据】
@@ -415,58 +433,118 @@ def build_prompt(report_text, chart_refs):
 # ─── HTML后处理：注入缺失表格 ─────────────────────────────
 
 
+# ─── HTML后处理：工具函数 ──────────────────────────────────
+
+
+def find_section_by_keywords(html, keywords):
+    """找到包含任一关键词的section（模糊匹配，Kimi每次生成的ID可能不同）"""
+    for m in re.finditer(r'<section\s+id="([^"]+)"', html):
+        sid = m.group(1)
+        for kw in keywords:
+            if kw.lower() in sid.lower():
+                return sid
+    return None
+
+
+def insert_before_analysis(html, section_id, content):
+    """在指定section的analysis-box前插入内容"""
+    if not section_id:
+        return html
+    idx = html.find(f'id="{section_id}"')
+    if idx < 0:
+        return html
+    box_start = html.find('<div class="analysis-box">', idx)
+    if box_start < 0:
+        return html
+    return html[:box_start] + content + html[box_start:]
+
+
 def inject_supplement_tables(html, report_text):
     """在Kimi生成的HTML中注入缺失的数据表格"""
     raw = open(str(SELL_TXT), encoding="utf-8").read() if SELL_TXT.exists() else ""
     if not raw or not html:
         return html
     
-    # 模糊匹配section id（Kimi每次生成的可能不同）
-    def find_section(html, keywords):
-        """找到包含任一关键词的section"""
-        for m in re.finditer(r'<section\s+id="([^"]+)"', html):
-            sid = m.group(1)
-            for kw in keywords:
-                if kw.lower() in sid.lower():
-                    return sid
-        return None
-    
-    def insert_before_analysis(html, section_id, content):
-        """在指定section的analysis-box前插入内容"""
-        if not section_id: return html
-        idx = html.find(f'id="{section_id}"')
-        if idx < 0: return html
-        box_start = html.find('<div class="analysis-box">', idx)
-        if box_start < 0: return html
-        return html[:box_start] + content + html[box_start:]
-    
     # 1. 天气前瞻表格（水情监测section）
-    hid = find_section(html, ['hydro', 'hydrolog', 'water'])
+    hid = find_section_by_keywords(html, ['hydro', 'hydrolog', 'water'])
     weather_html = _gen_weather_table(raw)
     html = insert_before_analysis(html, hid, weather_html)
     
     # 2. 昨日偏差表格（出清回顾section）
-    cid = find_section(html, ['clear', 'settlement'])
+    cid = find_section_by_keywords(html, ['clear', 'settlement'])
     dev_html = _gen_deviation_table(raw)
     html = insert_before_analysis(html, cid, dev_html)
     
     # 3. 来水偏差（趋势仪表盘section）
-    tid = find_section(html, ['trend'])
+    tid = find_section_by_keywords(html, ['trend'])
     hydro_dev = _gen_hydro_deviation(raw)
     html = insert_before_analysis(html, tid, hydro_dev)
     
     # 4. 系统备用（供给预测section）
-    sid_forecast = find_section(html, ['supply', 'forecast'])
+    sid_forecast = find_section_by_keywords(html, ['supply', 'forecast'])
     sys_res = _gen_sys_reserve_table(raw)
     html = insert_before_analysis(html, sid_forecast, sys_res)
     
     # 5. 火电开机趋势（火电复盘section）
-    fid = find_section(html, ['thermal', 'fire', '热'])
+    fid = find_section_by_keywords(html, ['thermal', 'fire', '热'])
     trend_fire = _gen_fire_trend_table(report_text)
     html = insert_before_analysis(html, fid, trend_fire)
     
     # 6. 替换市场参考分析框
     html = _fix_market_analysis(html, report_text)
+    
+    return html
+
+
+def inject_chart_refs(html, chart_files):
+    """确保所有生成的图表都在HTML中被引用，删除不存在图表的引用（Kimi幻觉修复）
+
+    两阶段操作：
+    1. 删除HTML中引用但磁盘不存在的图表（Kimi编造的）
+    2. 注入磁盘存在但HTML未引用的图表（Kimi遗漏的）
+    """
+    if not chart_files:
+        return html
+    
+    generated_names = set(f.name for f in chart_files)
+    existing_refs = set(re.findall(r'charts/([^")]+\.png)', html))
+    
+    # ── 阶段1: 删除不存在图表的引用 ──
+    bogus = existing_refs - generated_names
+    for ref in bogus:
+        # 删除包裹的 <figure>...</figure>
+        html = re.sub(
+            r'<figure[^>]*>\s*<img[^>]*charts/' + re.escape(ref) + r'[^>]*>\s*<figcaption[^>]*>.*?</figcaption>\s*</figure>',
+            '', html, flags=re.DOTALL
+        )
+        # 删除裸 <img> 标签
+        html = re.sub(
+            r'<img[^>]*charts/' + re.escape(ref) + r'[^>]*>',
+            '', html
+        )
+        log.warning(f"  已删除不存在图表引用: {ref}")
+    
+    # ── 阶段2: 注入缺失的图表引用 ──
+    _chart_map = {
+        "price_24h.png":  (["clear", "settlement"], "图1", "昨日24h分时电价走势"),
+        "output_stack.png": (["thermal", "fire", "热"], "图2", "昨日各电源出力堆叠"),
+        "trend_7d.png":     (["trend"], "图3", "近7日趋势（电价·水电占比·净缺口）"),
+        "competition.png":  (["hydro-power", "competition", "comp"], "图4", "逐时水电占比与竞争分析"),
+    }
+    
+    missing = generated_names - existing_refs
+    for fname in sorted(missing):
+        if fname not in _chart_map:
+            log.warning(f"  图表{fname}无对应section映射，跳过")
+            continue
+        keywords, label, caption = _chart_map[fname]
+        sid = find_section_by_keywords(html, keywords)
+        if sid:
+            chart_html = f'<figure><img src="charts/{fname}"><figcaption data-label="{label}">{caption}</figcaption></figure>\n'
+            html = insert_before_analysis(html, sid, chart_html)
+            log.info(f"  注入图表: {fname} → section {sid}")
+        else:
+            log.warning(f"  找不到{fname}对应的section（关键词: {keywords}），跳过")
     
     return html
 
@@ -711,12 +789,11 @@ def generate_pdf(api_key_open, api_key_code):
         
         data = parse_report_data(report_text, yesterday_str=yesterday_str)
         chart_files = gen_charts(data, charts_dir, date_str=yesterday_str)
-        chart_refs = "\n".join([f'<img src="charts/{f.name}">' for f in chart_files])
         log.info(f"  图表生成: {len(chart_files)}张")
         
         # Step 3: Kimi生成HTML
         log.info("Step 3: 调用Kimi生成HTML...")
-        system, user = build_prompt(report_text, chart_refs)
+        system, user = build_prompt(report_text, chart_files)
         
         raw = kimi_call_with_fallback(api_key_open, api_key_code, system, user, timeout=600, max_tokens=100000)
         html = extract_html(raw)
@@ -742,7 +819,15 @@ def generate_pdf(api_key_open, api_key_code):
         # Step 3.5: 注入缺失表格
         html = inject_supplement_tables(html, report_text)
         
-        log.info(f"  HTML: {len(html)}字符, tables={html.count('<table>')}, sections={html.count('<section')}")
+        # Step 3.6: 修正图表引用（删除Kimi幻觉，注入遗漏图表）
+        html = inject_chart_refs(html, chart_files)
+        
+        # 验证：最终图表引用 vs 实际生成
+        final_refs = set(re.findall(r'charts/([^")]+\.png)', html))
+        if final_refs != set(f.name for f in chart_files):
+            log.warning(f"  图表引用不匹配: 生成={set(f.name for f in chart_files)}, 引用={final_refs}")
+        
+        log.info(f"  HTML: {len(html)}字符, tables={html.count('<table>')}, sections={html.count('<section')}, charts={len(final_refs)}")
         
         # Step 4: caption下移
         html = move_captions(html)
@@ -769,11 +854,11 @@ def generate_pdf(api_key_open, api_key_code):
         if os.path.exists(latest_path): os.remove(latest_path)
         os.symlink(dated_name, latest_path)
         
-        log.info(f"  URL: {NGINX_BASE}/gen_side/gen_side_latest.pdf")
+        log.info(f"  URL: {NGINX_BASE}/gen_side/gen_side_{date_short}.pdf")
         
         result.update({
             "success": True,
-            "pdf_url": f"{NGINX_BASE}/gen_side/gen_side_latest.pdf",
+            "pdf_url": f"{NGINX_BASE}/gen_side/gen_side_{date_short}.pdf",
             "txt_url": f"{NGINX_BASE}/gen_side_latest.txt",
             "date": date_str, "tables": html.count("<table>"),
             "charts": len(chart_files),
