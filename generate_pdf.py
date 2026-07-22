@@ -126,6 +126,37 @@ def move_captions(html):
     return pat.sub(rep, html)
 
 
+# ─── 图表定义（build_prompt & inject_chart_refs 共用）─────
+
+
+CHART_DEFS = {
+    "price_24h.png": {
+        "section_label": "板块四（出清回顾）",
+        "section_kw": ["clear", "settlement"],
+        "fig_label": "图1", "caption": "昨日24h分时电价走势",
+        "prompt_rule": '- 4.1 价格出清（24小时）：必须引用图表 <img src="charts/price_24h.png">，下方只展示最高/最低/均价3行摘要，从图表和数据中提取实际值展示，不要臆想数值',
+    },
+    "output_stack.png": {
+        "section_label": "板块五（火电复盘）",
+        "section_kw": ["thermal", "fire", "热"],
+        "fig_label": "图2", "caption": "昨日各电源出力堆叠",
+        "prompt_rule": '- 5.1 火电24小时出力：必须引用图表 <img src="charts/output_stack.png"> 展示各电源出力对比，火电部分用一段总结说明，绝对不要输出24行的逐小时出力表',
+    },
+    "trend_7d.png": {
+        "section_label": "板块六（趋势仪表盘）",
+        "section_kw": ["trend"],
+        "fig_label": "图3", "caption": "近7日趋势（电价·水电占比·净缺口）",
+        "prompt_rule": '- 6.1 趋势仪表盘（近7日）：必须引用图表 <img src="charts/trend_7d.png">，下方只展示趋势研判分析，不要逐条复述数据',
+    },
+    "competition.png": {
+        "section_label": "板块八（竞争空间）",
+        "section_kw": ["hydro-power", "competition", "comp"],
+        "fig_label": "图4", "caption": "逐时水电占比与竞争分析",
+        "prompt_rule": '- 8.1 竞争空间（逐时水电占比）：必须引用图表 <img src="charts/competition.png">，下方用一段总结代替24行逐时表，聚焦竞争窗口分析',
+    },
+}
+
+
 # ─── 图表生成 ─────────────────────────────────────────────────
 
 def parse_report_data(text, yesterday_str=None):
@@ -353,19 +384,17 @@ def gen_charts(data, charts_dir, date_str=None):
 def build_prompt(report_text, chart_files):
     css = CSS_PATH.read_text(encoding="utf-8") if CSS_PATH.exists() else ""
     
-    # 动态构建图表指令（只列实际生成成功的图表，避免Kimi引用不存在的文件）
-    _chart_map = {
-        "price_24h.png": "板块四（出清回顾）",
-        "output_stack.png": "板块五（火电复盘）",
-        "trend_7d.png": "板块六（趋势仪表盘）",
-        "competition.png": "板块八（竞争空间）",
-    }
+    # 动态构建图表指令和规则（只列实际生成成功的图表）
     generated_names = [f.name for f in chart_files]
-    chart_list = []
+    chart_instructions = []
+    chart_rules = []
     for n in generated_names:
-        if n in _chart_map:
-            chart_list.append(f"   - {_chart_map[n]}: charts/{n}")
-    chart_instructions = "\n".join(chart_list) if chart_list else "（无可用图表）"
+        if n in CHART_DEFS:
+            d = CHART_DEFS[n]
+            chart_instructions.append(f"   - {d['section_label']}: charts/{n}")
+            chart_rules.append(d['prompt_rule'])
+    chart_instructions_text = "\n".join(chart_instructions) if chart_instructions else "（无可用图表）"
+    chart_rules_text = "\n".join(chart_rules)
     
     system = f"""你是专业的燃煤电厂发电侧运营分析师。将原始数据转换为面向电厂领导的发电侧日报完整HTML。
 
@@ -378,7 +407,7 @@ def build_prompt(report_text, chart_files):
 6. 每个section的标题用<h2>标签
 7. 图表引用格式：<figure><img src="charts/图表名.png"><figcaption data-label="图X">标题</figcaption></figure>
 8. 【硬约束】只能使用以下图表文件，禁止编造新的文件名。每个图表必须放在指定section中：
-{chart_instructions}
+{chart_instructions_text}
 
 【CSS样式】
 {css}
@@ -399,10 +428,7 @@ def build_prompt(report_text, chart_files):
 - 市场参考：300-500字。从交易策略角度研判：①期现价差含义 ②丰水期交易策略建议 ③风险预警
 
 【核心设计原则 - 表格精简】
-- 4.1 价格出清（24小时）：必须引用图表 <img src="charts/price_24h.png">，下方只展示最高/最低/均价3行摘要，从图表和数据中提取实际值展示，不要臆想数值
-- 5.1 火电24小时出力：必须引用图表 <img src="charts/output_stack.png"> 展示各电源出力对比，火电部分用一段总结说明，绝对不要输出24行的逐小时出力表
-- 6.1 趋势仪表盘（近7日）：必须引用图表 <img src="charts/trend_7d.png">，下方只展示趋势研判分析，不要逐条复述数据
-- 8.1 竞争空间（逐时水电占比）：必须引用图表 <img src="charts/competition.png">，下方用一段总结代替24行逐时表，聚焦竞争窗口分析
+{chart_rules_text}
 - 其余表格正常生成，保持25张以上的目标
 【重要标记说明】
 数据中出现的 `【数据表:xxx】` 标记（如【数据表:天气前瞻】、【数据表:系统备用】、【数据表:来水偏差】、【数据表:昨日偏差】、【数据表:火电开机趋势】）后面的内容必须做成独立表格展示，不能只写在分析框文字里。
@@ -419,7 +445,7 @@ def build_prompt(report_text, chart_files):
 2. 包含封面、目录、全部10个section，总表格≥25张
 3. 每个section结尾必须有分析框，字数达标、禁止复述表格数据、必须有指导意见
 4. 在对应section中引用以下图表（禁止使用其他文件名）：
-{chart_instructions}
+{chart_instructions_text}
 5. 所有单元格填入实际数据
 
 【数据】
@@ -428,9 +454,6 @@ def build_prompt(report_text, chart_files):
 请直接输出完整HTML代码。"""
     
     return system, user
-
-
-# ─── HTML后处理：注入缺失表格 ─────────────────────────────
 
 
 # ─── HTML后处理：工具函数 ──────────────────────────────────
@@ -525,26 +548,19 @@ def inject_chart_refs(html, chart_files):
         log.warning(f"  已删除不存在图表引用: {ref}")
     
     # ── 阶段2: 注入缺失的图表引用 ──
-    _chart_map = {
-        "price_24h.png":  (["clear", "settlement"], "图1", "昨日24h分时电价走势"),
-        "output_stack.png": (["thermal", "fire", "热"], "图2", "昨日各电源出力堆叠"),
-        "trend_7d.png":     (["trend"], "图3", "近7日趋势（电价·水电占比·净缺口）"),
-        "competition.png":  (["hydro-power", "competition", "comp"], "图4", "逐时水电占比与竞争分析"),
-    }
-    
     missing = generated_names - existing_refs
     for fname in sorted(missing):
-        if fname not in _chart_map:
+        if fname not in CHART_DEFS:
             log.warning(f"  图表{fname}无对应section映射，跳过")
             continue
-        keywords, label, caption = _chart_map[fname]
-        sid = find_section_by_keywords(html, keywords)
+        d = CHART_DEFS[fname]
+        sid = find_section_by_keywords(html, d["section_kw"])
         if sid:
-            chart_html = f'<figure><img src="charts/{fname}"><figcaption data-label="{label}">{caption}</figcaption></figure>\n'
+            chart_html = f'<figure><img src="charts/{fname}"><figcaption data-label="{d["fig_label"]}">{d["caption"]}</figcaption></figure>\n'
             html = insert_before_analysis(html, sid, chart_html)
             log.info(f"  注入图表: {fname} → section {sid}")
         else:
-            log.warning(f"  找不到{fname}对应的section（关键词: {keywords}），跳过")
+            log.warning(f"  找不到{fname}对应的section（关键词: {d['section_kw']}），跳过")
     
     return html
 
