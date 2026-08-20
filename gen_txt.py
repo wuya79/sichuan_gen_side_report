@@ -108,6 +108,11 @@ def get_competition_data(date_str):
         import raydon_api as ra
         hydro = ra.get_hydro_actual(date_str)
         load = ra.get_actual_load(date_str)
+        if not load:
+            d2 = (datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+            load = ra.get_actual_load(d2)
+            if load:
+                log.info(f"  竞争空间负荷使用D-2({d2})，接口暂不可用")
         re = ra.fetch_data(27, date_str)
         nim = ra.fetch_data(26, date_str)
         if not hydro or not load:
@@ -166,30 +171,65 @@ def gen_txt():
     thermal_load = ext(raw, r"火电负载率([\d.]+)%", "0")
     hydro_dev = ext(raw, r"偏差([-\d.]+)%", "0")
     
-    # 🔴 修复1: 滚动均价从价格对比取（或趋势仪表盘兜底）
-    # 价格对比行可能含滚动也可能不含，兼容两种格式
-    price_compare_all = ext_all(raw,
-        r"价格对比.*?现货\s*(\d+).*?滚动\s*(\d+).*?月度\s*(\d+)", None)
-    price_compare_simple = ext_all(raw,
-        r"价格对比.*?现货\s*(\d+).*?月度\s*(\d+)", None) if price_compare_all is None else None
-    if price_compare_all and len(price_compare_all) >= 3:
-        rolling_avg = price_compare_all[1]
-        spot_price = price_compare_all[0]
-        monthly_price = price_compare_all[2]
-    elif price_compare_simple and len(price_compare_simple) >= 2:
-        spot_price = price_compare_simple[0]
-        monthly_price = price_compare_simple[1]
-        # 滚动均价从趋势仪表盘兜底
-        _roll_trend = ext(raw, r"滚动均价:\s*([\d→]+)", "")
-        if _roll_trend:
-            _parts = _roll_trend.split("→")
-            rolling_avg = _parts[-1] if _parts else "0"
-        else:
-            rolling_avg = "0"
-    else:
-        rolling_avg = "0"
-        spot_price = avg_price
-        monthly_price = "0"
+    # ── 月内交易数据（从归档读取，替代正则提取） ──
+    rolling_avg = "0"
+    monthly_price = "0"
+    price_range = "-"
+    _d2_avg = _d3_avg = _d4_avg = "0"
+    _cont_avg = "0"
+    try:
+        import json as _json2, os as _os2
+        _archive_path = "/home/ubuntu/sichuan_hydro_price/.monthly_trade_archive.json"
+        if _os2.path.exists(_archive_path):
+            with open(_archive_path) as _f:
+                _archive = _json2.load(_f)
+            _yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+            _entry = _archive.get(_yesterday, {})
+            _roll = _entry.get("滚动", {})
+            if _roll:
+                _all_avgs = []
+                _all_weights = []
+                _all_prices = []
+                # 计算D+2/D+3/D+4实际日期，从归档中按日期匹配
+                _today = datetime.now()
+                _d2_key = (_today + timedelta(days=2)).strftime("%Y-%m-%d")
+                _d3_key = (_today + timedelta(days=3)).strftime("%Y-%m-%d")
+                _d4_key = (_today + timedelta(days=4)).strftime("%Y-%m-%d")
+                for _dk, _label in [(_d2_key, "_d2_avg"), (_d3_key, "_d3_avg"), (_d4_key, "_d4_avg")]:
+                    _dv = _roll.get(_dk, [])
+                    _prices = [x["均价"] for x in _dv if x.get("均价", 0) > 0]
+                    _vols = [x["成交量"] for x in _dv if x.get("成交量", 0) > 0]
+                    _w = int(sum(p*v for p,v in zip(_prices, _vols)) / sum(_vols)) if _prices and _vols else 0
+                    if _label == "_d2_avg": _d2_avg = str(_w) if _w else "0"
+                    elif _label == "_d3_avg": _d3_avg = str(_w) if _w else "0"
+                    elif _label == "_d4_avg": _d4_avg = str(_w) if _w else "0"
+                    if _prices and _vols:
+                        _all_avgs.extend(_prices)
+                        _all_weights.extend(_vols)
+                        _all_prices.extend(_prices)
+                if _all_avgs and _all_weights:
+                    rolling_avg = str(int(sum(a*w for a,w in zip(_all_avgs, _all_weights)) / sum(_all_weights)))
+                if _all_prices:
+                    price_range = f"{int(min(_all_prices))}-{int(max(_all_prices))}"
+            # 连续交易均价
+            _cont = _entry.get("连续", {})
+            _cont_list = _cont.get("时段", []) if isinstance(_cont, dict) else []
+            _cont_avgs = [x["均价"] for x in _cont_list if x.get("均价", 0) > 0]
+            _cont_avg = str(int(sum(_cont_avgs) / len(_cont_avgs))) if _cont_avgs else "0"
+        # 月度平台价（从人工录入的JSON读取）
+        _mp_path = "/home/ubuntu/sichuan_hydro_price/.monthly_platform_prices.json"
+        if _os2.path.exists(_mp_path):
+            with open(_mp_path) as _f:
+                _mp_data = _json2.load(_f)
+            _this_month = datetime.now().strftime("%Y-%m")
+            _mp_month = _mp_data.get(_this_month, {})
+            _mp_prices = _mp_month.get("prices", {})
+            if _mp_prices:
+                _vals = [v["platform_price"] for v in _mp_prices.values() if v.get("platform_price")]
+                if _vals:
+                    monthly_price = str(int(sum(_vals) / len(_vals)))
+    except Exception:
+        pass  # 归档读取失败，用默认值0
     
     thermal_cap = ext(raw, r"开机\d+台/(\d+)MW", "0")
     thermal_stop = ext(raw, r"停机\d+台/(\d+)MW", "0")
@@ -263,7 +303,7 @@ def gen_txt():
     fire_avg_int = int(fire_avg) if fire_avg.isdigit() else 0
     hydro_actual_int = int(hydro_actual) if hydro_actual.isdigit() else 1
     ratio = hydro_actual_int // max(1, fire_avg_int)
-    spot_int = int(spot_price) if spot_price.isdigit() else 0
+    spot_int = int(avg_price) if avg_price.isdigit() else 0
     rolling_int = int(rolling_avg) if rolling_avg.isdigit() else 0
     spread = rolling_int - spot_int
     monthly_int = int(monthly_price) if monthly_price.isdigit() else 0
@@ -503,8 +543,7 @@ def gen_txt():
     lines.append("")
     lines.append("7.1 滚动交易行情（D+2~D+4）")
     lines.append("合约日        均价        价格范围")
-    price_range = ext(raw, r"范围(\d+-\d+)")
-    # 从date_str动态计算D+2~D+4和月底日期
+    # 从date_str动态计算D+2~D+4日期
     try:
         _dt_base = datetime.strptime(date_str, "%Y-%m-%d")
     except (ValueError, TypeError):
@@ -514,21 +553,20 @@ def gen_txt():
     _d4 = _dt_base + timedelta(days=4)
     import calendar
     _last_day = calendar.monthrange(_dt_base.year, _dt_base.month)[1]
-    for label, dt in [("D+2", _d2), ("D+3", _d3), ("D+4", _d4)]:
+    for label, dt, pavg in [("D+2", _d2, _d2_avg), ("D+3", _d3, _d3_avg), ("D+4", _d4, _d4_avg)]:
         d_str = f"{dt.month}/{dt.day}"
-        lines.append(f"{label}({d_str})    {rolling_avg}         {price_range if price_range else '-'}")
-    lines.append(f"滚动均价：{rolling_avg}元/MWh")
+        lines.append(f"{label}({d_str})    {pavg}         {price_range}")
+    lines.append(f"滚动加权均价：{rolling_avg}元/MWh")
     lines.append("")
     lines.append("7.2 连续交易（D+5~月底）")
-    lines.append("标的日       均价        价格范围")
-    lines.append(f"{_dt_base.month}/{_last_day}        {rolling_avg}         {price_range if price_range else '-'}")
+    lines.append(f"标的日       均价        价格范围")
+    lines.append(f"{_dt_base.month}/{_last_day}        {_cont_avg}         -")
     lines.append("")
     lines.append("7.3 价格对比")
     lines.append("市场类型        价格        与现货价差")
-    lines.append(f"现货（昨日）     {spot_price}元         —")
-    lines.append(f"滚动D+2        {rolling_avg}元        升水+{spread}元")
-    lines.append(f"连续交易        {rolling_avg}元        升水+{spread}元")
-    lines.append(f"月度平台价      {monthly_price}元        升水+{monthly_int-spot_int}元")
+    lines.append(f"现货（昨日）     {avg_price}元         —")
+    lines.append(f"滚动D+2~D+4     {rolling_avg}元        升水+{rolling_int-spot_int}元")
+    lines.append(f"月度交易价格     {monthly_price}元        升水+{monthly_int-spot_int}元")
     lines.append("")
 
     # ── 八、水电占比与竞争空间 ──
@@ -649,10 +687,9 @@ def gen_txt():
             lines.append(f"最低价：{int(lp)}元 @ {lh:02d}时")
     lines.append("")
     lines.append("10.2 月内合约参考")
-    lines.append(f"滚动均价（D+2~D+4）：{rolling_avg}元/MWh")
-    lines.append(f"连续交易均价（D+5~月底）：{rolling_avg}元/MWh")
-    lines.append(f"月度平台价：{monthly_price}元/MWh")
-    lines.append(f"现货与滚动价差：{spread}元（滚动升水现货）")
+    lines.append(f"滚动加权均价（D+2~D+4）：{rolling_avg}元/MWh")
+    lines.append(f"月度交易价格：{monthly_price}元/MWh")
+    lines.append(f"现货与滚动价差：{rolling_int-spot_int}元（滚动升水现货）")
     lines.append("")
     lines.append("10.3 竞争格局参考")
     lines.append("时段        电价(MWh)   净缺口(MW)    水电占比")

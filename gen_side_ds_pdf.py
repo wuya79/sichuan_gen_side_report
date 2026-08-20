@@ -15,7 +15,7 @@ import os, sys, re, json, logging
 from pathlib import Path
 from datetime import datetime, timedelta
 
-SCRIPT_DIR = Path("/home/ubuntu/.hermes/scripts/gen_side")
+SCRIPT_DIR = Path(__file__).resolve().parent  # 2026-08-20: 旧硬编码~/.hermes/scripts/gen_side已删除,改为脚本所在目录
 NGINX_BASE = "http://118.24.77.156:18080/reports"
 NGINX_DIR = "/var/www/reports"
 GEN_SIDE_DIR = "/var/www/reports/gen_side"
