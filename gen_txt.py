@@ -192,8 +192,8 @@ def gen_txt():
     rolling_avg = "0"
     monthly_price = "0"
     price_range = "-"
-    _d2_avg = _d3_avg = _d4_avg = "0"
-    _cont_avg = "0"
+    _d2_avg = _d3_avg = _d4_avg = ""
+    _cont_avg = ""
     try:
         import json as _json2, os as _os2
         _archive_path = "/home/ubuntu/sichuan_hydro_price/.monthly_trade_archive.json"
@@ -217,9 +217,9 @@ def gen_txt():
                     _prices = [x["均价"] for x in _dv if x.get("均价", 0) > 0]
                     _vols = [x["成交量"] for x in _dv if x.get("成交量", 0) > 0]
                     _w = int(sum(p*v for p,v in zip(_prices, _vols)) / sum(_vols)) if _prices and _vols else 0
-                    if _label == "_d2_avg": _d2_avg = str(_w) if _w else "0"
-                    elif _label == "_d3_avg": _d3_avg = str(_w) if _w else "0"
-                    elif _label == "_d4_avg": _d4_avg = str(_w) if _w else "0"
+                    if _label == "_d2_avg": _d2_avg = str(_w) if _w else ""
+                    elif _label == "_d3_avg": _d3_avg = str(_w) if _w else ""
+                    elif _label == "_d4_avg": _d4_avg = str(_w) if _w else ""
                     if _prices and _vols:
                         _all_avgs.extend(_prices)
                         _all_weights.extend(_vols)
@@ -232,7 +232,7 @@ def gen_txt():
             _cont = _entry.get("连续", {})
             _cont_list = _cont.get("时段", []) if isinstance(_cont, dict) else []
             _cont_avgs = [x["均价"] for x in _cont_list if x.get("均价", 0) > 0]
-            _cont_avg = str(int(sum(_cont_avgs) / len(_cont_avgs))) if _cont_avgs else "0"
+            _cont_avg = str(int(sum(_cont_avgs) / len(_cont_avgs))) if _cont_avgs else ""
         # 月度平台价（从人工录入的JSON读取）
         _mp_path = "/home/ubuntu/sichuan_hydro_price/.monthly_platform_prices.json"
         if _os2.path.exists(_mp_path):
@@ -289,7 +289,7 @@ def gen_txt():
     wind_day_match = re.search(r"💨\s*风电:\s*日均(\d+)MW.*?峰(\d+).*?谷(\d+)", raw)
     load_day_match = re.search(r"⚡\s*负荷:\s*日均(\d+)MW.*?峰(\d+)(?:\((\d+:\d+)\))?.*?谷(\d+)", raw)
     
-    clear_dev = ext_all(raw, r"出清偏差:\s*日前(\d+)MW\s*vs\s*日内(\d+)MW\s*[↓↑]?\d+\(([\d.]+)%\)", ("0", "0", ""))
+    clear_dev = ext_all(raw, r"出清偏差:\s*日前(\d+)MW\s*vs\s*日内(\d+)MW\s*(?:[↓↑]?\d+\(([\d.]+)%\))?", ("0", "0", ""))
     
     thermal_maint = ext(raw, r"【火电】([^\n]*)", "无")
     hydro_maint = ext(raw, r"【水电】([^\n]*)", "无")
@@ -527,8 +527,11 @@ def gen_txt():
         lines.append(f"风电          {wg[0]} MW      {wg[1]} MW   {wg[2]}%     {_dev_judge(float(wg[2]))}")
     if nonmkt_act:
         _nm_a, _nm_f = int(nonmkt_act[0]), int(nonmkt_act[1])
-        _nm_dev = (_nm_a - _nm_f) / _nm_f * 100
-        lines.append(f"非市场化       {_nm_a} MW     {_nm_f} MW   {_nm_dev:+.1f}%     {_dev_judge(_nm_dev)}")
+        _nm_dev = (_nm_a - _nm_f) / _nm_f * 100 if _nm_f else None
+        if _nm_dev is not None:
+            lines.append(f"非市场化       {_nm_a} MW     {_nm_f} MW   {_nm_dev:+.1f}%     {_dev_judge(_nm_dev)}")
+        else:
+            lines.append(f"非市场化       {_nm_a} MW     {_nm_f} MW   —     —")
     lines.append("")
     # 亮点=最接近预测的电源，警示=偏差最大的电源，方向按符号动态生成
     _dev_items = []
@@ -629,12 +632,12 @@ def gen_txt():
     _last_day = calendar.monthrange(_dt_base.year, _dt_base.month)[1]
     for label, dt, pavg in [("D+2", _d2, _d2_avg), ("D+3", _d3, _d3_avg), ("D+4", _d4, _d4_avg)]:
         d_str = f"{dt.month}/{dt.day}"
-        lines.append(f"{label}({d_str})    {'—' if pavg == '0' else pavg}         {price_range}")
+        lines.append(f"{label}({d_str})    {'—' if not pavg else pavg}         {price_range}")
     lines.append(f"滚动加权均价：{rolling_avg}元/MWh")
     lines.append("")
     lines.append("7.2 连续交易（D+5~月底）")
     lines.append(f"标的日       均价        价格范围")
-    lines.append(f"{_dt_base.month}/{_last_day}        {'—' if _cont_avg == '0' else _cont_avg}         -")
+    lines.append(f"{_dt_base.month}/{_last_day}        {'—' if not _cont_avg else _cont_avg}         -")
     lines.append("")
     lines.append("7.3 价格对比")
     lines.append("市场类型        价格        与现货价差")
