@@ -164,11 +164,11 @@ def parse_report_data(text, yesterday_str=None):
     data = {}
     m = re.search(r"均价(\d+)", text)
     data["avg_price"] = int(m.group(1)) if m else 0
-    m = re.search(r"水电(\d+)%", text)
+    m = re.search(r"水电占比[：:]?\s*(\d+)%", text)
     data["hydro_pct"] = int(m.group(1)) if m else 0
-    m = re.search(r"净缺口\s*([-\d,]+)", text)
-    data["net_gap"] = int(m.group(1).replace(",","")) if m else 0
-    m = re.search(r"火电负载率([\d.]+)%", text)
+    m = re.search(r"净缺口\s*([+\-\d,]+)", text)
+    data["net_gap"] = int(m.group(1).replace(",", "")) if m else 0
+    m = re.search(r"火电利用率([\d.]+)%", text)
     data["thermal_load"] = float(m.group(1)) if m else 0
     m = re.search(r"火电日均出力\s*[：:]\s*(\d+)", text)
     data["fire_avg"] = int(m.group(1)) if m else 0
@@ -283,28 +283,48 @@ def gen_charts(data, charts_dir, date_str=None):
         chart_files.append(f)
         log.info(f"  Chart 1: 24h电价 {f}")
     
-    # Chart 2: 各电源出力堆叠图（从data或售电侧txt提取）
-    fig, ax = plt.subplots(figsize=(11, 4))
-    hours = list(range(24))
-    hydro = [34666]*24
-    fire_avg = data.get("fire_avg", 1736)
-    fire = [fire_avg]*24
-    solar = [0,0,0,0,0,0,0,0,500,2000,4000,5000,5000,4500,3500,2000,500,0,0,0,0,0,0,0]
-    wind = [800,700,600,600,700,800,1000,1200,1400,1300,1100,900,800,700,600,700,900,1100,1200,1100,1000,900,800,700]
-    ax.stackplot(hours, hydro, fire, solar, wind,
-                 labels=['水电','火电','光伏','风电'],
-                 colors=['#3498DB','#E74C3C','#F39C12','#2ECC71'], alpha=0.8)
-    ax.set_xlabel('时段'); ax.set_ylabel('出力(MW)')
-    ax.set_title('昨日各电源出力堆叠', fontsize=14, fontweight='bold')
-    ax.set_xticks(range(0, 24, 2))
-    ax.legend(loc='upper left')
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    f = charts_dir / "output_stack.png"
-    fig.savefig(str(f), dpi=120, bbox_inches='tight')
-    plt.close(fig)
-    chart_files.append(f)
-    log.info(f"  Chart 2: 出力堆叠 {f}")
+    # Chart 2: 各电源出力堆叠图（API动态96点；API不可用时跳过本图，不画死值假图）
+    hydro = fire = solar = wind = None
+    try:
+        sys.path.insert(0, str(RAYDON_PATH))
+        import raydon_api as ra
+        _cmp = ra.get_multi_filter_96points(2, date_str)
+        if _cmp and any(_cmp.values()):
+            def _h24(v96):
+                if not v96:
+                    return None
+                return [sum(v96[h * 4:(h + 1) * 4]) / 4 for h in range(24)]
+            hydro = _h24(_cmp.get("水电"))
+            fire = _h24(_cmp.get("火电"))
+            solar = _h24(_cmp.get("光伏"))
+            wind = _h24(_cmp.get("风电"))
+            log.info("  Chart 2: API电源96点数据 OK")
+    except Exception as e:
+        log.warning(f"  Chart 2: API电源数据获取失败: {e}")
+    if hydro and fire:
+        fig, ax = plt.subplots(figsize=(11, 4))
+        hours = list(range(24))
+        labels = ['水电', '火电']
+        vals = [hydro, fire]
+        colors = ['#3498DB', '#E74C3C']
+        if solar and any(solar):
+            labels.append('光伏'); vals.append(solar); colors.append('#F39C12')
+        if wind and any(wind):
+            labels.append('风电'); vals.append(wind); colors.append('#2ECC71')
+        ax.stackplot(hours, *vals, labels=labels, colors=colors, alpha=0.8)
+        ax.set_xlabel('时段'); ax.set_ylabel('出力(MW)')
+        ax.set_title('昨日各电源出力堆叠', fontsize=14, fontweight='bold')
+        ax.set_xticks(range(0, 24, 2))
+        ax.legend(loc='upper left')
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        f = charts_dir / "output_stack.png"
+        fig.savefig(str(f), dpi=120, bbox_inches='tight')
+        plt.close(fig)
+        chart_files.append(f)
+        log.info(f"  Chart 2: 出力堆叠 {f}")
+    else:
+        log.warning("  Chart 2: 电源数据不足，跳过（不输出死值图）")
     
     # Chart 3: 7日趋势
     if data.get("trend_prices"):
@@ -383,6 +403,9 @@ def gen_charts(data, charts_dir, date_str=None):
 
 def build_prompt(report_text, chart_files):
     css = CSS_PATH.read_text(encoding="utf-8") if CSS_PATH.exists() else ""
+    # 封面日期从txt标题提取（第2行 "# 2026-08-28（周五）"）
+    _cover_m = re.search(r"#\s*(\d{4}-\d{2}-\d{2})", report_text)
+    cover_date_str = _cover_m.group(1) if _cover_m else datetime.now().strftime("%Y-%m-%d")
     
     # 动态构建图表指令和规则（只列实际生成成功的图表）
     generated_names = [f.name for f in chart_files]
@@ -434,7 +457,7 @@ def build_prompt(report_text, chart_files):
 数据中出现的 `【数据表:xxx】` 标记（如【数据表:天气前瞻】、【数据表:系统备用】、【数据表:来水偏差】、【数据表:昨日偏差】、【数据表:火电开机趋势】）后面的内容必须做成独立表格展示，不能只写在分析框文字里。
 
 参考风格：
-【核心研判】丰水期深跌格局持续。水电占比高位满发运行，供给严重过剩。火电开机连续多日持平历史最低，日均出力极低。现货均价维持在低位，但月内滚动均价较现货大幅升水，反映远期市场对枯水期价格回升的预期。
+【核心研判】丰水期格局延续。水电占比高位满发运行，供给整体宽松。火电开机维持低位，日均出力偏低。现货均价与月内滚动均价之间存在价差——分析框必须依据数据表中给出的实际价差方向（升水=滚动高于现货，贴水=滚动低于现货）如实描述，严禁写与数据相反的方向。
 
 生成后请自检：表格是否达到25张以上？每个分析框字数是否达标？"""
 
@@ -447,6 +470,7 @@ def build_prompt(report_text, chart_files):
 4. 在对应section中引用以下图表（禁止使用其他文件名）：
 {chart_instructions_text}
 5. 所有单元格填入实际数据
+6. 【重要】封面页的报告周期必须写为"{cover_date_str}"，不要使用其他日期
 
 【数据】
 {report_text[:15000]}
@@ -685,20 +709,32 @@ def _fix_market_analysis(html, report_text):
     monthly = None
     m = re.search(r"全天均价[：:]\s*([\d.]+)", report_text)
     if m: spot = m.group(1)
-    m = re.search(r"滚动均价（D\+2~D\+4）[：:]\s*(\d+)", report_text)
+    m = re.search(r"滚动加权均价[（(]?D\+2~D\+4[）)]?[：:]\s*(\d+)", report_text)
     if m: rolling = m.group(1)
-    m = re.search(r"月度平台价[：:]\s*(\d+)", report_text)
+    m = re.search(r"月度交易价格[：:]\s*(\d+)", report_text)
     if m: monthly = m.group(1)
-    m = re.search(r"现货与滚动价差[：:]\s*(\d+)", report_text)
+    m = re.search(r"现货与滚动价差[：:]\s*([+\-]?\d+)", report_text)
     spread = m.group(1) if m else None
-    
+
     spot_str = f"{spot}元" if spot else "—"
     rolling_str = f"{rolling}元" if rolling else "—"
     monthly_str = f"{monthly}元" if monthly else "—"
-    spread_str = f"{spread}元" if spread else "—"
-    
+    # 价差方向动态生成（严禁硬编码升水/贴水方向）
+    if spread is not None:
+        _spread_num = int(spread)
+        if _spread_num > 0:
+            _spread_desc = f"滚动升水现货{abs(_spread_num)}元，市场对远期价格预期偏强"
+        elif _spread_num < 0:
+            _spread_desc = f"滚动贴水现货{abs(_spread_num)}元，市场对远期价格预期偏弱"
+        else:
+            _spread_desc = "期现价差持平"
+        spread_str = f"{_spread_num}元"
+    else:
+        _spread_desc = "期现价差方向以数据表为准"
+        spread_str = "—"
+
     new_box = f"""<div class="analysis-box">
-        <p>【市场综合研判】全天均价{spot_str}/MWh，现货与滚动均价{rolling_str}价差{spread_str}，期现价差反映远期枯水期价格预期。丰水期火电无竞争优势，建议保持最小开机状态，关注来水减弱信号（9月后水电出力下降）带来的市场格局变化。{'月度平台价' + monthly_str + '进一步印证市场对远期电价的乐观预期，可择机锁定远期合约利润。' if monthly else ''}</p>
+        <p>【市场综合研判】全天均价{spot_str}/MWh，现货与滚动均价{rolling_str}价差{spread_str}，{_spread_desc}。丰水期火电竞争空间有限，建议保持最小开机状态，关注来水变化信号带来的市场格局变化。{'月度交易价格' + monthly_str + '可作远期合约定价参考。' if monthly else ''}</p>
     </div>"""
     
     return html[:box_start] + new_box + html[box_end:]
