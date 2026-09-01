@@ -31,10 +31,10 @@ GEN_TXT = Path(NGINX_DIR) / "gen_side_latest.txt"
 SELL_TXT = Path(NGINX_DIR) / "daily_latest.txt"
 CSS_PATH = ASSETS_DIR / "report.css"
 KIMI_BASE_URL_OPEN = "https://api.moonshot.cn/v1"
-KIMI_MODEL_OPEN = "moonshot-v1-128k"
+KIMI_MODEL_OPEN = "kimi-k2.7-code-highspeed"  # 2026-09-01: moonshot-v1-128k 官方下线(8-31), 换新模型; 该模型强制temp=1
 # Kimi Code Plan（备用）
 KIMI_BASE_URL_CODE = "https://api.kimi.com/coding/v1"
-KIMI_MODEL_CODE = "moonshot-v1-128k"
+KIMI_MODEL_CODE = "kimi-for-coding-highspeed"  # 2026-09-01: moonshot-v1-128k 官方下线(8-31)
 RAYDON_PATH = Path(os.path.expanduser("~/sichuan_hydro_price"))
 PID_FILE = Path("/tmp/gen_side_pdf.pid")
 
@@ -71,7 +71,7 @@ def kimi_call_with_fallback(api_key_open, api_key_code, system, user, timeout=60
     # 主平台
     try:
         log.info("[PRIMARY] Kimi开放平台...")
-        result = _call(api_key_open, KIMI_BASE_URL_OPEN, KIMI_MODEL_OPEN, 0.2)
+        result = _call(api_key_open, KIMI_BASE_URL_OPEN, KIMI_MODEL_OPEN, 1)  # 新模型强制temp=1(2026-09-01起)
         log.info("[PRIMARY] ✅")
         return result
     except (openai.RateLimitError, openai.InternalServerError,
