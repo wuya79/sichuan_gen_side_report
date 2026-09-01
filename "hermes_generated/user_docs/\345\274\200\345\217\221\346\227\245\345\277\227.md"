@@ -130,3 +130,21 @@
 - 新增图表引用校验日志
 
 **验证**：干跑+完整PDF生成通过，4图全在正确section，0编造0遗漏。
+
+## 2026-09-01 Kimi 模型下线 + 完整性校验（大修）
+
+**事故**：moonshot-v1-128k 被 Kimi 官方 8-31 下线（platform.kimi.com 模型列表页官方确认），PRIMARY 404 ×4 + Code Plan 300s 确定性 504 ×4，当天 PDF 全天缺失，用户点链接发现 404。
+
+**修复**（generate_pdf.py 3 处 + 校验机制）：
+- L34/L37 模型：OPEN→`kimi-k2.7-code-highspeed`、CODE→`kimi-for-coding-highspeed`（两模型为同一底层，双计费渠道）
+- L74 PRIMARY 温度 0.2→1（新模型强制 temp=1，实测传 0.2 返回 400 "only 1 is allowed"）
+- 新增 `validate_data_integrity`：hard 集（均价/净缺口/水电占比/火电出力，数字+单位组合匹配）+ soft 集（txt 全数字覆盖率 ≥85%）+ 防静默失效（txt 格式变化计入缺失）
+- 生成改为最多 3 次尝试，重跑 prompt 告知缺失项；3 次不过 → 末次输出 + integrity_warning 告警
+- 实跑验证 ×3：1分43秒/1分42秒/2分09秒，均一次通过（正常路径零额外费用）
+- cron 09:50→10:00（避开 09:42 四川日报 PDF 的 Kimi 并发窗口）
+
+**temp=1 漂移实证**：同输入两次生成 26表651KB vs 33表431KB（字体嵌入 610 vs 11 glyphs 为主因）。校验机制即为此而生。
+
+**备选模型评估（均排除）**：k2.6 非思考模式（thinking disabled + temp 0.6）——8-9 分钟龟速（实测 28-78 tok/s）+ 两次实测第 2 次丢火电负载率；DeepSeek（temp 0.2 自由、无思考费用，但输出上限 ~19K tokens，扛不住 4 万 token 的 HTML）。
+
+**skill 同步**：sichuan-gen-side-daily-report 陷阱 26（下线+温度约束）+ 陷阱 27（校验机制）已更新。
