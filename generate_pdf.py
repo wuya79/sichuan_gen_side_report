@@ -128,7 +128,11 @@ def validate_data_integrity(html, report_text):
     missing = []
     for name, (pat, unit_pat) in hard_pat.items():
         m = re.search(pat, report_text)
-        if m and not re.search(unit_pat.format(v=re.escape(m.group(1).lstrip('-'))), html):
+        if m is None:
+            log.warning(f"  [校验] txt中未找到{name}字段(格式可能变化), 计入缺失防静默失效")
+            missing.append(name)
+            continue
+        if not re.search(unit_pat.format(v=re.escape(m.group(1).lstrip('-'))), html):
             missing.append(name)
     nums = re.findall(r'(\d+(?:\.\d+)?)\s*(?:元/MWh|MW|%)', report_text)
     nums = [n.lstrip('-') for n in nums]
