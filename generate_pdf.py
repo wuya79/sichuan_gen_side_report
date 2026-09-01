@@ -114,6 +114,28 @@ def check_html(html):
     return "</html>" in html and html.count("<section") >= 8
 
 
+def validate_data_integrity(html, report_text):
+    """数据完整性校验(2026-09-01新增, 应对temp=1输出漂移漏数据):
+    hard集=4个关键指标必须出现; soft集=txt中所有"数字+单位"覆盖率≥85%
+    Returns: (ok, missing_hard, coverage_ratio)
+    """
+    hard_pat = {
+        '均价': (r'昨日均价[：:]\s*(\d+(?:\.\d+)?)\s*元', r'{v}\s*元'),
+        '净缺口': (r'净缺口[：:]\s*(-?\d+(?:\.\d+)?)\s*MW', r'{v}\s*MW'),
+        '水电占比': (r'水电占比[：:]\s*(\d+(?:\.\d+)?)\s*%', r'{v}\s*%'),
+        '火电出力': (r'火电日均出力[：:]\s*(\d+(?:\.\d+)?)\s*MW', r'{v}\s*MW'),
+    }
+    missing = []
+    for name, (pat, unit_pat) in hard_pat.items():
+        m = re.search(pat, report_text)
+        if m and not re.search(unit_pat.format(v=re.escape(m.group(1).lstrip('-'))), html):
+            missing.append(name)
+    nums = re.findall(r'(\d+(?:\.\d+)?)\s*(?:元/MWh|MW|%)', report_text)
+    nums = [n.lstrip('-') for n in nums]
+    ratio = sum(1 for n in nums if n in html) / len(nums) if nums else 1.0
+    return (len(missing) == 0 and ratio >= 0.85), missing, ratio
+
+
 def move_captions(html):
     pat = re.compile(r'(<table[^>]*>)\s*<caption[^>]*data-label="([^"]*)"[^>]*>([\s\S]*?)</caption>\s*(.*?</table>)', re.DOTALL)
     def rep(m):
@@ -849,16 +871,26 @@ def generate_pdf(api_key_open, api_key_code):
         
         raw = kimi_call_with_fallback(api_key_open, api_key_code, system, user, timeout=600, max_tokens=100000)
         html = extract_html(raw)
-        
-        if not check_html(html):
-            log.warning("  HTML不完整，重试...")
-            raw2 = kimi_call_with_fallback(api_key_open, api_key_code, system,
-                user + "\n\n【重要】上次输出不完整，请输出完整HTML包含全部10个section。",
-                timeout=600, max_tokens=100000)
-            html2 = extract_html(raw2)
-            if check_html(html2):
-                html = html2
-                log.info("  重试成功")
+
+        # 完整性校验: 结构+关键数据点, 最多3次尝试 (2026-09-01新增)
+        integrity_warning = False
+        _ok, _missing, _ratio = validate_data_integrity(html, report_text)
+        if not (check_html(html) and _ok):
+            for attempt in range(2, 4):
+                log.warning(f"  第{attempt-1}次校验未通过: 缺{_missing or '结构'}, 数字覆盖率{_ratio:.0%}，重试...")
+                raw = kimi_call_with_fallback(api_key_open, api_key_code, system,
+                    user + f"\n\n【重要】上次输出缺关键数据: {_missing or '结构不完整'}。请确保以下数值出现在正文中: 均价/净缺口/水电占比/火电出力，且全部表格和section完整。",
+                    timeout=600, max_tokens=100000)
+                html = extract_html(raw)
+                _ok, _missing, _ratio = validate_data_integrity(html, report_text)
+                if check_html(html) and _ok:
+                    log.info(f"  完整性校验通过 (第{attempt}次, 覆盖率{_ratio:.0%})")
+                    break
+            else:
+                integrity_warning = True
+                log.error(f"  ⚠️ 3次生成均未通过完整性校验(缺{_missing}, 覆盖率{_ratio:.0%})，使用最后一次输出并标注告警")
+        else:
+            log.info(f"  完整性校验通过 (第1次, 覆盖率{_ratio:.0%})")
         
         # 注入CSS
         css = CSS_PATH.read_text(encoding="utf-8") if CSS_PATH.exists() else ""
@@ -914,6 +946,7 @@ def generate_pdf(api_key_open, api_key_code):
             "txt_url": f"{NGINX_BASE}/gen_side_latest.txt",
             "date": date_str, "tables": html.count("<table>"),
             "charts": len(chart_files),
+            "integrity_warning": integrity_warning,
         })
         
     except Exception as e:
@@ -944,6 +977,8 @@ def main():
         print(f"  PDF: {result['pdf_url']}")
         print(f"  TXT: {result['txt_url']}")
         print(f"  表格: {result.get('tables',0)}张, 图表: {result.get('charts',0)}张")
+        if result.get("integrity_warning"):
+            print("⚠️ 数据完整性校验未通过(3次重试), 报告可能缺失关键数据, 请人工核对!")
 
         # OSS 上传（下游系统交付通道）
         if result.get("date"):
