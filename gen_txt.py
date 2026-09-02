@@ -57,7 +57,14 @@ def ext(raw, pattern, default="", flags=0):
     return m.group(1).strip() if m.lastindex and m.lastindex >= 1 else m.group(0).strip()
 
 
-def ext_all(raw, pattern, default=""):
+def _disp(val, unit=" 元/MWh"):
+    """数值显示：数据未取得（空/非数字）时显式显示'未取得'，严禁用0冒充真实数据。
+    支持整数和小数（如'46.5'），防止真实小数值被误判为未取得。"""
+    _s = str(val).strip()
+    return f"{val}{unit}" if (_s.replace('.', '', 1).isdigit()) else "未取得"
+
+
+def ext_all(raw, pattern, default=None):
     """提取多个捕获组，返回元组"""
     m = re.search(pattern, raw)
     if not m: return default
@@ -181,16 +188,16 @@ def gen_txt():
     wd_cn = ext(raw, r"(周一|周二|周三|周四|周五|周六|周日)", "周一")
 
     # ── 提取所有字段 ──
-    avg_price = ext(raw, r"均价(\d+)元", "0")
-    today_morning = ext(raw, r"今日凌晨(\d+)元", "0")
-    ng_raw = ext(raw, r"净缺口([+\-\d,]+)", "0")
-    net_gap = ng_raw.replace(",", "").replace("净缺口", "")
-    hydro_pct = ext(raw, r"水电(\d+)%", "0")
-    thermal_load = ext(raw, r"火电负载率([\d.]+)%", "0")
+    avg_price = ext(raw, r"均价(\d+)元", "")
+    today_morning = ext(raw, r"今日凌晨(\d+)元", "")
+    _ng = re.search(r"净缺口([+\-\d,]+)", raw)
+    net_gap = _ng.group(1).replace(",", "").replace("净缺口", "") if _ng else ""
+    hydro_pct = ext(raw, r"水电(\d+)%", "")
+    thermal_load = ext(raw, r"火电负载率([\d.]+)%", "")
     
     # ── 月内交易数据（从归档读取，替代正则提取） ──
-    rolling_avg = "0"
-    monthly_price = "0"
+    rolling_avg = ""
+    monthly_price = ""
     price_range = "-"
     _d2_avg = _d3_avg = _d4_avg = ""
     _cont_avg = ""
@@ -248,26 +255,26 @@ def gen_txt():
     except Exception:
         pass  # 归档读取失败，用默认值0
     
-    thermal_cap = ext(raw, r"开机\d+台/(\d+)MW", "0")
-    thermal_stop = ext(raw, r"停机\d+台/(\d+)MW", "0")
-    thermal_util = ext(raw, r"利用率([\d.]+)%", "0")
+    thermal_cap = ext(raw, r"开机\d+台/(\d+)MW", "")
+    thermal_stop = ext(raw, r"停机\d+台/(\d+)MW", "")
+    thermal_util = ext(raw, r"利用率([\d.]+)%", "")
     season = ext(raw, r"(丰水期|平水期|枯水期|蓄水期)", "丰水期")
-    load_avg = ext(raw, r"日均(\d+)MW", "0")
-    hydro_avail = ext(raw, r"水电(\d+)MW\s*\([\d.]+%\)", "0")
-    re_avg = ext(raw, r"新能源(\d+)MW", "0")
+    load_avg = ext(raw, r"日均(\d+)MW", "")
+    hydro_avail = ext(raw, r"水电(\d+)MW\s*\([\d.]+%\)", "")
+    re_avg = ext(raw, r"新能源(\d+)MW", "")
     # 🔴 修复2: 非市场化取值（完整数字）
-    non_mkt = ext(raw, r"非市场化\s*([\d,]+)", "0").replace(",", "")
-    total_avail_raw = ext(raw, r"总可用:\s*([\d,]+)", "0")
+    non_mkt = ext(raw, r"非市场化\s*([\d,]+)", "").replace(",", "")
+    total_avail_raw = ext(raw, r"总可用:\s*([\d,]+)", "")
     total_avail = total_avail_raw.replace(",", "")
     # 系统备用（多行，取到下一个━━━或行尾）
     sys_reserve = ext(raw, r"系统备用:([\s\S]*?)(?=\n\s*周预测|\n\s*🔥|\n\s*📚|\n\s*━━━|$)", "")
     # 周预测
     week_fc = ext(raw, r"周预测\s*（D.*?）[：:](.*?)(?=\n\s*⚠️|\n\s*🔥|\n\s*📚|$)", "")
-    fire_avg = ext(raw, r"🔥\s*火电:\s*实际(\d+)MW", "0")
-    hydro_actual = ext(raw, r"💧\s*水电:\s*日均(\d+)MW", "0")
-    thermal_units = ext(raw, r"开机(\d+)台", "0")
-    thermal_stopped_units = ext(raw, r"停机(\d+)台", "0")
-    debao = ext(raw, r"德宝直流.*?(\d+)MW", "0")
+    fire_avg = ext(raw, r"🔥\s*火电:\s*实际(\d+)MW", "")
+    hydro_actual = ext(raw, r"💧\s*水电:\s*日均(\d+)MW", "")
+    thermal_units = ext(raw, r"开机(\d+)台", "")
+    thermal_stopped_units = ext(raw, r"停机(\d+)台", "")
+    debao = ext(raw, r"德宝直流.*?(\d+)MW", "")
     
     # 偏差数据（re.search 取多组）
     load_act_match = re.search(r"⚡\s*负荷:\s*实际(\d+)MW\s*预测(\d+)\s*偏差([+\-.\d]+)%", raw)
@@ -289,7 +296,7 @@ def gen_txt():
     wind_day_match = re.search(r"💨\s*风电:\s*日均(\d+)MW.*?峰(\d+).*?谷(\d+)", raw)
     load_day_match = re.search(r"⚡\s*负荷:\s*日均(\d+)MW.*?峰(\d+)(?:\((\d+:\d+)\))?.*?谷(\d+)", raw)
     
-    clear_dev = ext_all(raw, r"出清偏差:\s*日前(\d+)MW\s*vs\s*日内(\d+)MW\s*(?:[↓↑]?\d+\(([\d.]+)%\))?", ("0", "0", ""))
+    clear_dev = ext_all(raw, r"出清偏差:\s*日前(\d+)MW\s*vs\s*日内(\d+)MW\s*(?:[↓↑]?\d+\(([\d.]+)%\))?", None)
     
     thermal_maint = ext(raw, r"【火电】([^\n]*)", "无")
     hydro_maint = ext(raw, r"【水电】([^\n]*)", "无")
@@ -298,7 +305,7 @@ def gen_txt():
     trans_maint = ext(raw, r"【主变】([^\n]*)", "无")
     
     # 来水指数
-    wi_val = ext(raw, r"综合来水指数:\s*([\d.]+)", "0")
+    wi_val = ext(raw, r"综合来水指数:\s*([\d.]+)", "")
     # 来水指数描述（从行中"—"之后取，去掉emoji）
     wi_desc_full = ext(raw, r"综合来水指数:\s*[\d.]+\s*.*?—\s*(.*)", "")
     if wi_desc_full:
@@ -309,51 +316,57 @@ def gen_txt():
     # 趋势数据
     trend_days = ext(raw, r"📈\s*趋势\(.*?\):\s*([\d→%↑↓↑]+)", "")
 
-    # 近7日日期标签（从date_str往前推6天）
+    # 近7日日期标签：5.3火电开机趋势=今天终点(含今日数据)；
+    # 六板块趋势仪表盘序列来自售电侧⑤趋势盘=昨天终点(今日电价未出)
     try:
         _dt = datetime.strptime(date_str, "%Y-%m-%d") if '-' in date_str else datetime.now()
     except (ValueError, TypeError):
         _dt = datetime.now()
     _trend_dates = [(_dt - timedelta(days=i)).strftime("%m-%d") for i in range(6, -1, -1)]
     _trend_date_str = "  ".join(_trend_dates)
-    _trend_date_range = f"{_trend_dates[0]}~{_trend_dates[-1]}"
+    _dt6 = _dt - timedelta(days=1)
+    _six_dates = [(_dt6 - timedelta(days=i)).strftime("%m-%d") for i in range(6, -1, -1)]
+    _six_date_str = "  ".join(_six_dates)
+    _six_range = f"{_six_dates[0]}~{_six_dates[-1]}"
     
     # 计算相关值
+    price_ok = avg_price.isdigit()
     fire_avg_int = int(fire_avg) if fire_avg.isdigit() else 0
-    hydro_actual_int = int(hydro_actual) if hydro_actual.isdigit() else 1
-    ratio = hydro_actual_int // max(1, fire_avg_int)
-    spot_int = int(avg_price) if avg_price.isdigit() else 0
-    rolling_int = int(rolling_avg) if rolling_avg.isdigit() else 0
-    spread = rolling_int - spot_int
-    monthly_int = int(monthly_price) if monthly_price.isdigit() else 0
+    hydro_actual_ok = hydro_actual.isdigit()
+    hydro_actual_int = int(hydro_actual) if hydro_actual_ok else 0
+    ratio_str = f"{hydro_actual_int // fire_avg_int}" if (hydro_actual_ok and fire_avg_int > 0) else "—"
+    spot_int = int(avg_price) if price_ok else None
+    rolling_int = int(rolling_avg) if rolling_avg.isdigit() else None
+    spread = rolling_int - spot_int if (price_ok and rolling_int is not None) else None
+    monthly_int = int(monthly_price) if monthly_price.isdigit() else None
 
     lines = []
 
     # ── 标题 ──
     lines.append(f"# 四川燃煤电厂发电侧交易日报")
     lines.append(f"# {date_str}（{wd_cn}）")
-    lines.append(f"# 报告期间：日前市场 {date_str} | 实时市场 昨日")
     lines.append(f"# 水期：{season}（6-9月）调度原则：优先不弃水")
     lines.append("")
 
     # ── 一、核心指标摘要 ──
     lines.append("一、核心指标摘要")
     lines.append("")
-    try:
+    if net_gap:
         _ng_int = int(net_gap)
-    except (ValueError, TypeError):
+        _gap_judge = "供给过剩" if _ng_int < 0 else ("供给偏紧" if _ng_int > 0 else "供需平衡")
+    else:
         _ng_int = 0
-    _gap_judge = "供给过剩" if _ng_int < 0 else ("供给偏紧" if _ng_int > 0 else "供需平衡")
-    lines.append(f"昨日均价：{avg_price} 元/MWh | 今日凌晨：{today_morning} 元/MWh | 净缺口：{net_gap} MW（{_gap_judge}）")
-    lines.append(f"水电占比：{hydro_pct}% | 火电日均出力：{fire_avg} MW | 月内滚动均价：{rolling_avg} 元/MWh")
+        _gap_judge = "—"
+    lines.append(f"昨日均价：{_disp(avg_price)} | 今日凌晨：{_disp(today_morning)} | 净缺口：{net_gap if net_gap else '未取得'}MW（{_gap_judge}）")
+    lines.append(f"水电占比：{_disp(hydro_pct, '%')} | 火电日均出力：{_disp(fire_avg, ' MW')} | 月内滚动均价：{_disp(rolling_avg)}")
     lines.append("")
     lines.append(f"指标                数值")
-    lines.append(f"昨日均价            {avg_price} 元/MWh")
-    lines.append(f"火电日均出力          {fire_avg} MW")
-    lines.append(f"净缺口              {net_gap} MW（{_gap_judge}）")
-    lines.append(f"水电占比            {hydro_pct}%")
-    lines.append(f"负荷               {load_avg} MW")
-    lines.append(f"月内滚动均价         {rolling_avg} 元/MWh")
+    lines.append(f"昨日均价            {_disp(avg_price)}")
+    lines.append(f"火电日均出力          {_disp(fire_avg, ' MW')}")
+    lines.append(f"净缺口              {net_gap if net_gap else '未取得'}MW（{_gap_judge}）")
+    lines.append(f"水电占比            {_disp(hydro_pct, '%')}")
+    lines.append(f"负荷               {_disp(load_avg, ' MW')}")
+    lines.append(f"月内滚动均价         {_disp(rolling_avg)}")
     lines.append("")
     # 🔴 修复4: 超汛限电站提取
     exceed_list = re.findall(r"[🌊]?[\u4e00-\u9fff]+[·.][\u4e00-\u9fff]+\([^)]*\)\s*水位[\d.]+\s*超汛限[+\-]\d+m", raw)
@@ -361,9 +374,9 @@ def gen_txt():
     # 火电开机趋势是否连续持平（从源txt趋势数据动态判断）
     _fire_vals = [x.strip() for x in trend_days.split("→")] if trend_days else []
     _fire_flat = "连续7日持平" if _fire_vals and len(set(_fire_vals)) == 1 else ""
-    lines.append(f"重要变化：（1）火电开机{thermal_cap}MW（{thermal_units}台）{_fire_flat}；"
-                 f"（2）净缺口{net_gap}MW，{_gap_judge}；"
-                 f"（3）水电占比{hydro_pct}%；"
+    lines.append(f"重要变化：（1）火电开机{_disp(thermal_cap, 'MW')}（{_disp(thermal_units, '台')}）{_fire_flat}；"
+                 f"（2）净缺口{net_gap if net_gap else '未取得'}MW，{_gap_judge}；"
+                 f"（3）水电占比{_disp(hydro_pct, '%')}；"
                  f"{'（4）' + exceed_str + '。' if exceed_str else ''}")
     lines.append("")
 
@@ -379,7 +392,7 @@ def gen_txt():
             lines.append(wl.strip())
     lines.append("")
     lines.append("2.2 综合来水与蓄放水")
-    lines.append(f"综合来水指数：{wi_val} — {wi_desc}")
+    lines.append(f"综合来水指数：{_disp(wi_val, '')} — {wi_desc if wi_desc else '未取得'}")
     basin_line = ext(raw, r"流域:.*$", "", flags=re.MULTILINE)
     if basin_line: lines.append(basin_line)
     ws = block(raw, "蓄放水状态", "━━━", offset=10)
@@ -401,7 +414,7 @@ def gen_txt():
     lines.append("")
     lines.append("【数据表:天气前瞻】未来72小时流域降雨数据")
     lines.append("水情研判：")
-    lines.append(f"综合来水指数{wi_val}{wi_desc}，大渡河、雅砻江为双主驱动力。")
+    lines.append(f"综合来水指数{_disp(wi_val, '')}{wi_desc or '未取得'}，大渡河、雅砻江为双主驱动力。")
     near_limit = re.findall(r"[🌊]?(大渡河|雅砻江|嘉陵江|岷江|涪江|金沙江)[·.]([\u4e00-\u9fff]+)\(.*?\).*?(距汛限[-\d]+m|超汛限[+\d]+m)", raw)
     for river, name, status in near_limit[:5]:
         if "超汛限" in status:
@@ -426,26 +439,33 @@ def gen_txt():
     _hydro_share = round(int(hydro_avail) / _ta_int * 100, 1) if _ta_int and hydro_avail.isdigit() else None
     _re_share = round(int(re_avg) / _ta_int * 100, 1) if _ta_int and re_avg.isdigit() else None
     _nm_share = round(int(non_mkt) / _ta_int * 100, 1) if _ta_int and non_mkt.isdigit() else None
-    lines.append(f"日均负荷           {load_avg} MW              —")
-    lines.append(f"水电可用           {hydro_avail} MW              {_hydro_share:.1f}%" if _hydro_share is not None else f"水电可用           {hydro_avail} MW              —")
-    lines.append(f"新能源             {re_avg} MW               {_re_share:.1f}%" if _re_share is not None else f"新能源             {re_avg} MW               —")
-    lines.append(f"非市场化           {non_mkt} MW               {_nm_share:.1f}%" if _nm_share is not None else f"非市场化           {non_mkt} MW               —")
-    lines.append(f"总可用             {total_avail} MW              —")
+    lines.append(f"日均负荷           {_disp(load_avg, ' MW')}              —")
+    lines.append(f"水电可用           {_disp(hydro_avail, ' MW')}              {_hydro_share:.1f}%" if _hydro_share is not None else f"水电可用           {_disp(hydro_avail, ' MW')}              —")
+    lines.append(f"新能源             {_disp(re_avg, ' MW')}               {_re_share:.1f}%" if _re_share is not None else f"新能源             {_disp(re_avg, ' MW')}               —")
+    lines.append(f"非市场化           {_disp(non_mkt, ' MW')}               {_nm_share:.1f}%" if _nm_share is not None else f"非市场化           {_disp(non_mkt, ' MW')}               —")
+    lines.append(f"总可用             {_disp(total_avail, ' MW')}              —")
     lines.append("")
-    lines.append(f"供需平衡：负荷{load_avg} MW | 总可用{total_avail} MW | 净缺口{net_gap} MW（占负荷{abs(float(net_gap))/max(1,int(load_avg))*100:.1f}%）")
+    if net_gap:
+        _pct = abs(float(net_gap)) / max(1, int(load_avg) if load_avg.isdigit() else 1) * 100
+        lines.append(f"供需平衡：负荷{_disp(load_avg, ' MW')} | 总可用{_disp(total_avail, ' MW')} | 净缺口{net_gap} MW（占负荷{_pct:.1f}%）")
+    else:
+        lines.append(f"供需平衡：负荷{_disp(load_avg, ' MW')} | 总可用{_disp(total_avail, ' MW')} | 净缺口未取得")
     lines.append(f"→ {_gap_judge}")
     lines.append("")
     lines.append("火电竞争空间：")
     if _ng_int < 0:
-        lines.append(f"净缺口 {net_gap} MW → {_gap_judge}，火电可竞争空间为0")
+        lines.append(f"净缺口 {net_gap if net_gap else '未取得'}MW → {_gap_judge}，火电可竞争空间为0")
     else:
-        lines.append(f"净缺口 {net_gap} MW → {_gap_judge}，火电存在竞争空间")
-    lines.append(f"火电开机参考 {thermal_cap} MW（{thermal_units}台）| 停机 {thermal_stopped_units}台/{thermal_stop} MW")
-    lines.append(f"火电利用率{thermal_util}%")
+        lines.append(f"净缺口 {net_gap if net_gap else '未取得'}MW → {_gap_judge}，火电存在竞争空间")
+    lines.append(f"火电开机参考 {_disp(thermal_cap, ' MW')}（{_disp(thermal_units, '台')}）| 停机 {_disp(thermal_stopped_units, '台')}/{_disp(thermal_stop, ' MW')}")
+    lines.append(f"火电利用率{_disp(thermal_util, '%')}")
     lines.append("")
     if sys_reserve:
         lines.append("【数据表:系统备用】")
         lines.append(f"系统备用：{sys_reserve}")
+        lines.append("")
+    else:
+        lines.append("系统备用：未取得（上游数据缺失）")
         lines.append("")
     if week_fc:
         lines.append(f"周预测：{week_fc}")
@@ -458,9 +478,9 @@ def gen_txt():
     # 从API数据计算均价（不与售电侧txt的avg_price混用），供后续板块使用
     if hourly:
         valid_p = [p for p in hourly if p is not None]
-        calc_avg = round(sum(valid_p) / len(valid_p), 1) if valid_p else float(avg_price)
+        calc_avg = round(sum(valid_p) / len(valid_p), 1) if valid_p else None
     else:
-        calc_avg = float(avg_price)
+        calc_avg = None
     if hourly:
         lines.append("4.1 价格出清（24小时）")
         valid_p = [p for p in hourly if p is not None]
@@ -478,8 +498,14 @@ def gen_txt():
             v_str = f"{v}" if v is not None else "—"
             lines.append(f"{h:02d}:00    {v_str}元")
         lines.append("")
+    else:
+        lines.append("4.1 价格出清（24小时）")
+        lines.append("⚠️ 昨日价格数据未取得（上游数据缺失），本小节暂不提供")
+        lines.append("")
     lines.append("4.2 各电源出力")
     lines.append("电源       日均出力        峰值            谷值       特征")
+    if not (hydro_day_match or fire_day_match or solar_day_match or wind_day_match or load_day_match):
+        lines.append("⚠️ 昨日各电源出力数据未取得（上游数据缺失）")
     # 电源特征动态计算（旧版写死"满发运行/全天平稳极低水平/午间5,000MW+/正常"）
     _waved = ""
     _fp = _fv = 0
@@ -556,6 +582,10 @@ def gen_txt():
         else:
             lines.append(f"日前出清{cd0} MW vs 日内出清{cd1} MW，偏差{_cd_dir}{abs(_cd_diff)}MW")
         lines.append("")
+    else:
+        lines.append("4.4 出清偏差")
+        lines.append("⚠️ 出清数据未取得（上游数据缺失），偏差暂不计算")
+        lines.append("")
 
     # ── 五、火电出力复盘 ──
     lines.append("五、火电出力复盘（昨日）")
@@ -565,23 +595,26 @@ def gen_txt():
         lines.append(f"火电出力{_waved}（峰{_fp}MW 谷{_fv}MW），整体处于低出力区间")
         lines.append(f"日均{fire_day_match.group(1)} MW | 峰值{_fp} MW | 谷值{_fv} MW")
     else:
-        lines.append(f"日均{fire_avg} MW | 峰谷数据不足")
+        lines.append(f"日均{_disp(fire_avg, ' MW')} | 峰谷数据不足")
     lines.append("→ 水电满发挤压下，火电仅保持最小开机，连续多日无调节空间")
     lines.append("")
     lines.append("5.2 火电 vs 水电出力")
-    lines.append(f"火电{fire_avg} MW | 水电{hydro_actual} MW | 水火比 1:{ratio}")
-    lines.append(f"→ 水电是火电的{ratio}倍，火电在系统中几乎无存在感")
+    if hydro_actual_ok:
+        lines.append(f"火电{fire_avg} MW | 水电{hydro_actual} MW | 水火比 1:{ratio_str}")
+        lines.append(f"→ 水电是火电的{ratio_str}倍，火电在系统中几乎无存在感")
+    else:
+        lines.append(f"火电{fire_avg} MW | 水电未取得 | 水火比暂不计算")
+        lines.append("→ 水电实际出力数据未取得（上游数据缺失），水火比待数据恢复后补充")
     lines.append("")
     lines.append("【数据表:火电开机趋势】")
     lines.append("5.3 火电开机趋势（近7日）")
     lines.append(_trend_date_str)
     if trend_days:
         parts_t = trend_days.split("→")
-        lines.append("  ".join(p.strip() for p in parts_t[:7]) + f"（{thermal_units}台）")
+        lines.append("  ".join(p.strip() for p in parts_t[:7]) + f"（{_disp(thermal_units, '台')}）")
     else:
-        # 兜底：用thermal_cap和thermal_units动态生成（避免死值）
-        _cap = thermal_cap.replace(",", "") if thermal_cap.isdigit() or thermal_cap.replace(",","").isdigit() else "3700"
-        lines.append(f"{_cap}  {_cap}  {_cap}  {_cap}  {_cap}  {_cap}  {_cap}（{thermal_units}台）")
+        # 数据缺失：显式未取得（禁止硬编码兜底值）
+        lines.append(f"⚠️ 火电开机趋势数据未取得（上游数据缺失），本表暂不提供")
     # 趋势结论动态生成（旧版写死"连续7日持平，历史最低水平"，与逐日数据矛盾）
     if _fire_vals and len(set(_fire_vals)) == 1:
         lines.append("趋势：连续7日持平")
@@ -592,9 +625,9 @@ def gen_txt():
     lines.append("")
 
     # ── 六、趋势仪表盘 ──
-    lines.append(f"六、趋势仪表盘（近7日 {_trend_date_range}）")
+    lines.append(f"六、趋势仪表盘（近7日 {_six_range}）")
     lines.append("")
-    lines.append(f"指标               {_trend_date_str}   变化")
+    lines.append(f"指标               {_six_date_str}   变化")
     # 🔴 修复6: 趋势仪表盘数据提取
     trend_lines_map = {
         "电价": r"电价:\s*([\d→↑↓%元/MWh\s]+)",
@@ -613,6 +646,9 @@ def gen_txt():
     if hydro_dev_line:
         lines.append("【数据表:来水偏差】")
         lines.append(f"  来水偏差：{hydro_dev_line}")
+        lines.append("")
+    else:
+        lines.append("来水偏差：未取得（上游数据缺失）")
         lines.append("")
 
     # ── 七、月内交易参考 ──
@@ -633,7 +669,7 @@ def gen_txt():
     for label, dt, pavg in [("D+2", _d2, _d2_avg), ("D+3", _d3, _d3_avg), ("D+4", _d4, _d4_avg)]:
         d_str = f"{dt.month}/{dt.day}"
         lines.append(f"{label}({d_str})    {'—' if not pavg else pavg}         {price_range}")
-    lines.append(f"滚动加权均价：{rolling_avg}元/MWh")
+    lines.append(f"滚动加权均价：{_disp(rolling_avg)}")
     lines.append("")
     lines.append("7.2 连续交易（D+5~月底）")
     lines.append(f"标的日       均价        价格范围")
@@ -641,9 +677,9 @@ def gen_txt():
     lines.append("")
     lines.append("7.3 价格对比")
     lines.append("市场类型        价格        与现货价差")
-    lines.append(f"现货（昨日）     {avg_price}元         —")
-    lines.append(f"滚动D+2~D+4     {rolling_avg}元        {_spread_str(spread)}")
-    lines.append(f"月度交易价格     {monthly_price}元        {_spread_str(monthly_int - spot_int)}")
+    lines.append(f"现货（昨日）     {_disp(avg_price)}         —")
+    lines.append(f"滚动D+2~D+4     {_disp(rolling_avg)}        {_spread_str(spread) if spread is not None else '—'}")
+    lines.append(f"月度交易价格     {_disp(monthly_price)}        {_spread_str(monthly_int - spot_int) if (monthly_int is not None and spot_int is not None) else '—'}")
     lines.append("")
 
     # ── 八、水电占比与竞争空间 ──
@@ -656,29 +692,12 @@ def gen_txt():
             gap_str = f"+{cd['gap']}" if cd['gap'] >= 0 else str(cd['gap'])
             lines.append(f"{cd['hour']:02d}:00    {cd['load']:,}    {cd['hydro']:,}     {cd['pct']}%   {gap_str:>8}   {cd['judge']}")
     else:
-        # 兜底：用已有变量估算全天逐时数据
-        load_int = int(load_avg) if load_avg.isdigit() else 41000
-        hydro_int = int(hydro_actual) if hydro_actual.isdigit() else 34000
-        nonmkt_int = int(non_mkt) if non_mkt.isdigit() else 5500
-        re_int = int(re_avg) if re_avg.isdigit() else 2700
-        lines.append("时段       负荷(MW)   水电(MW)   占比   净缺口(MW)   竞争判断")
-        for h in range(24):
-            # 模拟日内负荷波动：早低晚高
-            h_load = round(load_int * (0.85 + 0.15 * abs(12 - h) / 12))
-            h_hydro = round(hydro_int * 1.0)
-            # 净缺口=负荷-水电-非市场化-新能源（简化）
-            gap = h_load - h_hydro - nonmkt_int - re_int
-            pct = round(h_hydro / h_load * 100) if h_load > 0 else 0
-            if gap < -500: judge = "供给过剩"
-            elif gap < 500: judge = "紧平衡"
-            else: judge = "有空间⚡"
-            gap_str = f"+{gap}" if gap >= 0 else str(gap)
-            lines.append(f"{h:02d}:00    {h_load:,}    {h_hydro:,}     {pct}%   {gap_str:>8}   {judge}")
-        log.warning("  竞争空间使用兜底估算数据（API不可用）")
+        lines.append("⚠️ 逐时竞争空间数据未取得（上游API不可用），本板块暂不提供逐时表")
+        log.warning("  竞争空间API不可用，输出'未取得'占位（禁止模拟数据）")
     lines.append("")
     lines.append("省间受入参考：")
-    lines.append(f"德宝直流：陕→川 {debao}MW")
-    lines.append(f"省间净受入合计：{debao}MW")
+    lines.append(f"德宝直流：陕→川 {_disp(debao, 'MW')}")
+    lines.append(f"省间净受入合计：{_disp(debao, 'MW')}")
     lines.append("")
     lines.append("关键时段：")
     # 从comp_data动态生成关键时段结论
@@ -750,7 +769,10 @@ def gen_txt():
     lines.append("十、昨日市场参考")
     lines.append("")
     lines.append("10.1 价格参考")
-    lines.append(f"全天均价：{calc_avg}元/MWh")
+    if calc_avg is not None:
+        lines.append(f"全天均价：{calc_avg}元/MWh")
+    else:
+        lines.append("全天均价：未取得（上游价格数据缺失）")
     if hourly:
         valid_p = [p for p in hourly if p is not None]
         if valid_p:
@@ -761,9 +783,12 @@ def gen_txt():
             lines.append(f"最低价：{int(lp)}元 @ {lh:02d}时")
     lines.append("")
     lines.append("10.2 月内合约参考")
-    lines.append(f"滚动加权均价（D+2~D+4）：{rolling_avg}元/MWh")
-    lines.append(f"月度交易价格：{monthly_price}元/MWh")
-    lines.append(f"现货与滚动价差：{spread}元（{'滚动升水现货' if spread > 0 else ('滚动贴水现货' if spread < 0 else '价差持平')}）")
+    lines.append(f"滚动加权均价（D+2~D+4）：{_disp(rolling_avg)}")
+    lines.append(f"月度交易价格：{_disp(monthly_price)}")
+    if spread is not None:
+        lines.append(f"现货与滚动价差：{spread}元（{'滚动升水现货' if spread > 0 else ('滚动贴水现货' if spread < 0 else '价差持平')}）")
+    else:
+        lines.append("现货与滚动价差：未取得（现货或滚动价格缺失）")
     lines.append("")
     lines.append("10.3 竞争格局参考")
     lines.append("时段        电价(MWh)   净缺口(MW)    水电占比")
@@ -784,6 +809,8 @@ def gen_txt():
             gaps = [cd['gap'] for cd in pdata]
             pcts = [cd['pct'] for cd in pdata]
             lines.append(f"{pname}    {prange:>8}   {min(gaps):,}~{max(gaps):,}   {min(pcts)}-{max(pcts)}%")
+    else:
+        lines.append("⚠️ 逐时数据未取得（上游API不可用），竞争格局参考暂不提供")
     lines.append("")
     lines.append("───")
     lines.append("四川省数据开放平台 + 国网元数据")

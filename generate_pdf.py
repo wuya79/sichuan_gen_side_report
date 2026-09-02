@@ -115,29 +115,68 @@ def check_html(html):
 
 
 def validate_data_integrity(html, report_text):
-    """数据完整性校验(2026-09-01新增, 应对temp=1输出漂移漏数据):
-    hard集=4个关键指标必须出现; soft集=txt中所有"数字+单位"覆盖率≥85%
-    Returns: (ok, missing_hard, coverage_ratio)
+    """数据完整性校验 v2 (2026-09-02 重写):
+    从发电侧txt提取6个核心字段值 → HTML剥标签纯文本中同字段提取 → 数值一致性比对。
+    规则: ①源为"未取得"→HTML必须也是"未取得"(填数字=编造);
+          ②源为数字→HTML必须同值(编造/抄错=不一致);
+          ③源字段缺失(txt格式变化)→计入缺失防静默失效。
+    Returns: (ok, missing, mismatched)
     """
-    hard_pat = {
-        '均价': (r'昨日均价[：:]\s*(\d+(?:\.\d+)?)\s*元', r'{v}\s*元'),
-        '净缺口': (r'净缺口[：:]\s*(-?\d+(?:\.\d+)?)\s*MW', r'{v}\s*MW'),
-        '水电占比': (r'水电占比[：:]\s*(\d+(?:\.\d+)?)\s*%', r'{v}\s*%'),
-        '火电出力': (r'火电日均出力[：:]\s*(\d+(?:\.\d+)?)\s*MW', r'{v}\s*MW'),
-    }
-    missing = []
-    for name, (pat, unit_pat) in hard_pat.items():
-        m = re.search(pat, report_text)
-        if m is None:
+    _fields = ['昨日均价', '净缺口', '水电占比', '火电日均出力', '负荷', '滚动加权', '月度交易价格']
+    # HTML侧剔除目录页（页码会被误当字段值），再剥标签
+    _body = re.sub(r'<div[^>]*class="toc-page"[^>]*>.*?(?=<section)', ' ', html, flags=re.S)
+    plain = re.sub(r'<[^>]+>', ' ', _body)
+
+    def _val_after(text, name, maxlen=60, prefix_exclude=''):
+        """定位字段名，取其后首个数值或'未取得'（先剥括号注释，防'D+2'干扰）。
+        跳过目录页等无值出现位置，取第一个真正带值的出现。
+        跳过目录页码形态（3+点号后跟数字），防页码被当字段值。
+        prefix_exclude: 字段名前缀排除集（如'负荷'排除'占负荷/净负荷'撞车）。"""
+        start = 0
+        while True:
+            i = text.find(name, start)
+            if i < 0:
+                return None
+            if prefix_exclude and i > 0 and text[i - 1] in prefix_exclude:
+                start = i + 1  # 撞车前缀（如"占负荷"），跳过
+                continue
+            tail = text[i + len(name): i + len(name) + maxlen]
+            tail = re.sub(r'[（(][^）)]*[）)]', ' ', tail)
+            m = re.search(r'(未取得|-?\d[\d,]*\.?\d*%?)', tail)
+            if m:
+                v = m.group(1)
+                if v != '未取得' and re.search(r'\.{3,}\s*$', tail[:m.start()]):
+                    start = i + 1  # 数字前紧邻点号串=目录页码，跳过
+                    continue
+                return v
+            start = i + 1
+
+    def _norm(v):
+        if v == '未取得':
+            return '未取得'
+        s = v.replace(',', '').replace('%', '').strip()
+        if s.startswith('+'):
+            s = s[1:]
+        try:
+            return float(s)
+        except ValueError:
+            return s
+
+    missing, mismatched = [], []
+    for name in _fields:
+        _prefix = '占净' if name == '负荷' else ''
+        v_src = _val_after(report_text, name, prefix_exclude=_prefix)
+        if v_src is None:
             log.warning(f"  [校验] txt中未找到{name}字段(格式可能变化), 计入缺失防静默失效")
             missing.append(name)
             continue
-        if not re.search(unit_pat.format(v=re.escape(m.group(1).lstrip('-'))), html):
+        v_html = _val_after(plain, name, prefix_exclude=_prefix)
+        if v_html is None:
             missing.append(name)
-    nums = re.findall(r'(\d+(?:\.\d+)?)\s*(?:元/MWh|MW|%)', report_text)
-    nums = [n.lstrip('-') for n in nums]
-    ratio = sum(1 for n in nums if n in html) / len(nums) if nums else 1.0
-    return (len(missing) == 0 and ratio >= 0.85), missing, ratio
+            continue
+        if _norm(v_src) != _norm(v_html):
+            mismatched.append(f"{name}(txt={v_src},html={v_html})")
+    return (len(missing) == 0 and len(mismatched) == 0), missing, mismatched
 
 
 def move_captions(html):
@@ -152,31 +191,37 @@ def move_captions(html):
     return pat.sub(rep, html)
 
 
+def _fix_cover(html):
+    """封面硬约束：删除LLM擅自添加的'日前市场/实时市场'日期行(2026-09-02用户发现编造日期)。
+    用tempered dot防止跨标签吞并相邻的'报告周期'行。"""
+    return re.sub(r'<p[^>]*>(?:(?!</p>).)*?(?:日前市场|实时市场)(?:(?!</p>).)*?</p>\s*', '', html, flags=re.S)
+
+
 # ─── 图表定义（build_prompt & inject_chart_refs 共用）─────
 
 
 CHART_DEFS = {
     "price_24h.png": {
         "section_label": "板块四（出清回顾）",
-        "section_kw": ["clear", "settlement"],
+        "section_kw": ["出清", "clear"],
         "fig_label": "图1", "caption": "昨日24h分时电价走势",
         "prompt_rule": '- 4.1 价格出清（24小时）：必须引用图表 <img src="charts/price_24h.png">，下方只展示最高/最低/均价3行摘要，从图表和数据中提取实际值展示，不要臆想数值',
     },
     "output_stack.png": {
         "section_label": "板块五（火电复盘）",
-        "section_kw": ["thermal", "fire", "热"],
+        "section_kw": ["火电", "thermal"],
         "fig_label": "图2", "caption": "昨日各电源出力堆叠",
         "prompt_rule": '- 5.1 火电24小时出力：必须引用图表 <img src="charts/output_stack.png"> 展示各电源出力对比，火电部分用一段总结说明，绝对不要输出24行的逐小时出力表',
     },
     "trend_7d.png": {
         "section_label": "板块六（趋势仪表盘）",
-        "section_kw": ["trend"],
+        "section_kw": ["趋势", "trend"],
         "fig_label": "图3", "caption": "近7日趋势（电价·水电占比·净缺口）",
         "prompt_rule": '- 6.1 趋势仪表盘（近7日）：必须引用图表 <img src="charts/trend_7d.png">，下方只展示趋势研判分析，不要逐条复述数据',
     },
     "competition.png": {
         "section_label": "板块八（竞争空间）",
-        "section_kw": ["hydro-power", "competition", "comp"],
+        "section_kw": ["竞争", "competition", "comp"],
         "fig_label": "图4", "caption": "逐时水电占比与竞争分析",
         "prompt_rule": '- 8.1 竞争空间（逐时水电占比）：必须引用图表 <img src="charts/competition.png">，下方用一段总结代替24行逐时表，聚焦竞争窗口分析',
     },
@@ -186,18 +231,29 @@ CHART_DEFS = {
 # ─── 图表生成 ─────────────────────────────────────────────────
 
 def parse_report_data(text, yesterday_str=None):
-    """从发电侧txt解析结构化数据，含趋势标签和竞争空间逐时数据"""
+    """从发电侧txt解析结构化数据，含趋势标签和竞争空间逐时数据。
+    全部字段锚定发电侧txt固定字段名；取不到返回None（严禁填0冒充真实数据）。
+    2026-09-02修复: avg_price裸"均价"锚定会抓月内交易"9/3: 均价61"→改锚定"昨日均价"。"""
     data = {}
-    m = re.search(r"均价(\d+)", text)
-    data["avg_price"] = int(m.group(1)) if m else 0
-    m = re.search(r"水电占比[：:]?\s*(\d+)%", text)
-    data["hydro_pct"] = int(m.group(1)) if m else 0
-    m = re.search(r"净缺口\s*([+\-\d,]+)", text)
-    data["net_gap"] = int(m.group(1).replace(",", "")) if m else 0
-    m = re.search(r"火电利用率([\d.]+)%", text)
-    data["thermal_load"] = float(m.group(1)) if m else 0
-    m = re.search(r"火电日均出力\s*[：:]\s*(\d+)", text)
-    data["fire_avg"] = int(m.group(1)) if m else 0
+
+    def _int_or_none(pat):
+        m = re.search(pat, text)
+        if not m:
+            return None
+        try:
+            return int(m.group(1).replace(",", ""))
+        except ValueError:
+            return round(float(m.group(1)))  # 小数防御（如均价83.5），四舍五入
+
+    def _float_or_none(pat):
+        m = re.search(pat, text)
+        return float(m.group(1)) if m else None
+
+    data["avg_price"] = _int_or_none(r"昨日均价[：:]?\s*(-?[\d.]+)")
+    data["hydro_pct"] = _int_or_none(r"水电占比[：:]?\s*([\d.]+)\s*%")
+    data["net_gap"] = _int_or_none(r"净缺口[：:]?\s*([+\-]?[\d,]+)")
+    data["thermal_load"] = _float_or_none(r"火电利用率[：:]?\s*([\d.]+)\s*%")
+    data["fire_avg"] = _int_or_none(r"火电日均出力[：:]?\s*([\d.]+)")
     
     # 24h电价
     prices = re.findall(r"(\d{2}):00\s+(\d+)元", text)
@@ -267,7 +323,7 @@ def gen_charts(data, charts_dir, date_str=None):
     
     # Chart 1: 24h电价折线图（直接从API获取）
     hourly_prices = data.get("hourly_prices", [])
-    avg_price = data.get("avg_price", 0)
+    avg_price = data.get("avg_price")
     # 如果txt里解析不到，直接从API拉
     if not hourly_prices and date_str:
         try:
@@ -292,8 +348,9 @@ def gen_charts(data, charts_dir, date_str=None):
         hours = list(range(24))
         prices = hourly_prices
         ax.plot(hours, prices, color='#E74C3C', linewidth=2, marker='o', markersize=4)
-        ax.axhline(y=avg_price, color='gray', linestyle='--', alpha=0.5, label=f'均价{avg_price}元')
-        ax.fill_between(hours, prices, avg_price, alpha=0.1, color='#E74C3C')
+        if avg_price is not None:
+            ax.axhline(y=avg_price, color='gray', linestyle='--', alpha=0.5, label=f'均价{avg_price}元')
+            ax.fill_between(hours, prices, avg_price, alpha=0.1, color='#E74C3C')
         ax.set_xlabel('时段'); ax.set_ylabel('电价(元/MWh)')
         ax.set_title('昨日24h分时电价走势', fontsize=14, fontweight='bold')
         ax.set_xticks(range(0, 24, 2))
@@ -375,12 +432,17 @@ def gen_charts(data, charts_dir, date_str=None):
             axes[1].set_title('近7日水电占比', fontsize=12, fontweight='bold')
             axes[1].grid(True, alpha=0.3)
         
-        # 净缺口
-        ng = [data["net_gap"]]*7
-        bars = axes[2].bar(days, ng, color=['red' if x < 0 else 'green' for x in ng], alpha=0.7)
+        # 净缺口（仅当日单值：水平线+标注，禁止7根同值柱冒充趋势）
+        _ng_val = data.get("net_gap")
         axes[2].axhline(y=0, color='gray', linestyle='-', linewidth=0.5)
+        if _ng_val is not None:
+            axes[2].axhline(y=_ng_val, color='green' if _ng_val >= 0 else 'red', linestyle='--', linewidth=1.5)
+            _ng_label = f'今日净缺口{_ng_val:+d}MW' if _ng_val else '净缺口≈0'
+            axes[2].text(days[len(days)//2], _ng_val, _ng_label, ha='center', va='bottom', fontsize=9, fontweight='bold')
+        else:
+            axes[2].text(days[len(days)//2], 0, '净缺口数据未取得', ha='center', va='bottom', fontsize=9, fontweight='bold')
         axes[2].set_ylabel('净缺口(MW)')
-        axes[2].set_title('近7日净缺口', fontsize=12, fontweight='bold')
+        axes[2].set_title('今日净缺口（单值，非7日趋势）', fontsize=12, fontweight='bold')
         axes[2].set_xticks(days)
         axes[2].set_xticklabels(labels, rotation=45)
         axes[2].grid(True, alpha=0.3)
@@ -392,19 +454,16 @@ def gen_charts(data, charts_dir, date_str=None):
         chart_files.append(f)
         log.info(f"  Chart 3: 7日趋势 {f}")
     
-    # Chart 4: 竞争空间
+    # Chart 4: 竞争空间（API数据缺失时不生成，严禁硬编码假数据图）
+    comp_hourly = data.get("comp_hourly", [])
+    if not (comp_hourly and len(comp_hourly) == 24):
+        log.warning("  Chart 4: 竞争空间API数据缺失，跳过（禁止硬编码假数据图）")
+        return chart_files
     fig, ax1 = plt.subplots(figsize=(12, 4.5))
     hours = list(range(24))
-    # 优先使用API实时数据，fallback到硬编码
-    comp_hourly = data.get("comp_hourly", [])
-    if comp_hourly and len(comp_hourly) == 24:
-        hydro_pcts = [ch['pct'] for ch in comp_hourly]
-        hydro_vals = [ch['hydro'] for ch in comp_hourly]
-        load_vals = [ch['load'] for ch in comp_hourly]
-    else:
-        hydro_pcts = [88,91,93,95,96,96,94,88,84,78,76,75,74,75,77,84,87,87,89,90,90,88,83,85]
-        hydro_vals = [34666]*24
-        load_vals = [41343]*24
+    hydro_pcts = [ch['pct'] for ch in comp_hourly]
+    hydro_vals = [ch['hydro'] for ch in comp_hourly]
+    load_vals = [ch['load'] for ch in comp_hourly]
     colors = ['#E74C3C' if p <= 80 else '#F39C12' if p <= 85 else '#2ECC71' for p in hydro_pcts]
     ax1.bar(hours, hydro_pcts, color=colors, alpha=0.7, label='水电占比(%)')
     ax1.set_xlabel('时段'); ax1.set_ylabel('水电占比(%)')
@@ -449,7 +508,7 @@ def build_prompt(report_text, chart_files):
 
 【HTML结构 - 必须严格遵循】
 1. 输出完整HTML（<!DOCTYPE html>到</html>），不要Markdown代码块
-2. 必须包含：封面(.cover) + 目录(.toc-page) + 10个section
+2. 必须包含：封面(.cover) + 目录(目录容器div的class必须为"toc-page") + 10个section
 3. 总表格数必须达到25张以上，每张表有<caption data-label="表X">标题</caption>
 4. 每个section结尾必须有<div class="analysis-box"><p>分析内容</p></div>
 5. 所有单元格填入实际数据，禁止"--"
@@ -482,6 +541,14 @@ def build_prompt(report_text, chart_files):
 【重要标记说明】
 数据中出现的 `【数据表:xxx】` 标记（如【数据表:天气前瞻】、【数据表:系统备用】、【数据表:来水偏差】、【数据表:昨日偏差】、【数据表:火电开机趋势】）后面的内容必须做成独立表格展示，不能只写在分析框文字里。
 
+【数据缺失处理 - 硬约束】
+1. 数据区中标注"未取得"或"⚠️...无法提供/暂不提供"的字段：HTML对应位置必须原样写"未取得"，严禁填0、严禁推算估算、严禁编造数值、严禁从其他字段换算。
+2. 缺失的表格（如逐时表）保持表头+未取得说明，禁止虚构数据行。
+3. 数据区中不存在的数值，正文、表格、分析框中一律禁止出现。
+
+【数字溯源 - 硬约束】
+正文、表格、分析框中出现的关键数据数值（价格、出力、占比、缺口、水位、水量、气温等）必须能在下方【数据】原文中找到出处（允许单位换写，不允许数值变化）。分析需要引用某个缺失数据时，必须写"数据未取得，无法判断"，严禁猜测具体数值。字段名称必须与【数据】原文保持一致（如"昨日均价""净缺口""水电占比""火电日均出力"），不得改写为其他叫法。
+
 参考风格：
 【核心研判】丰水期格局延续。水电占比高位满发运行，供给整体宽松。火电开机维持低位，日均出力偏低。现货均价与月内滚动均价之间存在价差——分析框必须依据数据表中给出的实际价差方向（升水=滚动高于现货，贴水=滚动低于现货）如实描述，严禁写与数据相反的方向。
 
@@ -496,7 +563,7 @@ def build_prompt(report_text, chart_files):
 4. 在对应section中引用以下图表（禁止使用其他文件名）：
 {chart_instructions_text}
 5. 所有单元格填入实际数据
-6. 【重要】封面页的报告周期必须写为"{cover_date_str}"，不要使用其他日期
+6. 【重要】封面页只允许一行日期信息："报告周期：{cover_date_str}"。严禁在封面写"日前市场""实时市场"或任何其他日期/市场字样（封面其余内容只允许：报告标题、编制单位、水期与调度原则）
 
 【数据】
 {report_text[:15000]}
@@ -510,26 +577,40 @@ def build_prompt(report_text, chart_files):
 
 
 def find_section_by_keywords(html, keywords):
-    """找到包含任一关键词的section（模糊匹配，Kimi每次生成的ID可能不同）"""
-    for m in re.finditer(r'<section\s+id="([^"]+)"', html):
-        sid = m.group(1)
+    """定位section：优先按h2标题关键词精确匹配，兜底按整块文本匹配。
+    不依赖Kimi生成的id名(2026-09-02实测id=sec1~sec10导致注入全失效)。
+    返回块起始索引，找不到返回None。"""
+    for m in re.finditer(r'<section[^>]*>', html):
+        sec_start = m.start()
+        sec_end_m = re.search(r'</section>', html[sec_start:])
+        sec_end = sec_end_m.start() + sec_start if sec_end_m else len(html)
+        h2_m = re.search(r'<h2[^>]*>([\s\S]*?)</h2>', html[sec_start:sec_end])
+        h2_text = re.sub(r'<[^>]+>', '', h2_m.group(1)) if h2_m else ''
         for kw in keywords:
-            if kw.lower() in sid.lower():
-                return sid
+            if kw.lower() in h2_text.lower():
+                return sec_start
+    # 兜底：h2未命中时按整块文本匹配
+    for m in re.finditer(r'<section[^>]*>', html):
+        sec_start = m.start()
+        sec_end_m = re.search(r'</section>', html[sec_start:])
+        sec_end = sec_end_m.start() + sec_start if sec_end_m else len(html)
+        sec_text = html[sec_start:sec_end]
+        for kw in keywords:
+            if kw.lower() in sec_text.lower():
+                return sec_start
     return None
 
 
-def insert_before_analysis(html, section_id, content):
-    """在指定section的analysis-box前插入内容"""
-    if not section_id:
+def insert_before_analysis(html, section_pos, content):
+    """在指定section的analysis-box前插入内容；无analysis-box则插在</section>前"""
+    if section_pos is None:
         return html
-    idx = html.find(f'id="{section_id}"')
-    if idx < 0:
-        return html
-    box_start = html.find('<div class="analysis-box">', idx)
-    if box_start < 0:
-        return html
-    return html[:box_start] + content + html[box_start:]
+    sec_end_m = re.search(r'</section>', html[section_pos:])
+    sec_end = sec_end_m.start() + section_pos if sec_end_m else len(html)
+    box_start = html.find('<div class="analysis-box">', section_pos, sec_end)
+    if box_start >= 0:
+        return html[:box_start] + content + html[box_start:]
+    return html[:sec_end] + content + html[sec_end:]
 
 
 def inject_supplement_tables(html, report_text):
@@ -539,27 +620,27 @@ def inject_supplement_tables(html, report_text):
         return html
     
     # 1. 天气前瞻表格（水情监测section）
-    hid = find_section_by_keywords(html, ['hydro', 'hydrolog', 'water'])
+    hid = find_section_by_keywords(html, ['水情', 'water', 'hydro'])
     weather_html = _gen_weather_table(raw)
     html = insert_before_analysis(html, hid, weather_html)
     
     # 2. 昨日偏差表格（出清回顾section）
-    cid = find_section_by_keywords(html, ['clear', 'settlement'])
+    cid = find_section_by_keywords(html, ['出清', 'clear'])
     dev_html = _gen_deviation_table(raw)
     html = insert_before_analysis(html, cid, dev_html)
     
     # 3. 来水偏差（趋势仪表盘section）
-    tid = find_section_by_keywords(html, ['trend'])
+    tid = find_section_by_keywords(html, ['趋势', 'trend'])
     hydro_dev = _gen_hydro_deviation(raw)
     html = insert_before_analysis(html, tid, hydro_dev)
     
     # 4. 系统备用（供给预测section）
-    sid_forecast = find_section_by_keywords(html, ['supply', 'forecast'])
+    sid_forecast = find_section_by_keywords(html, ['供给', 'supply'])
     sys_res = _gen_sys_reserve_table(raw)
     html = insert_before_analysis(html, sid_forecast, sys_res)
     
     # 5. 火电开机趋势（火电复盘section）
-    fid = find_section_by_keywords(html, ['thermal', 'fire', '热'])
+    fid = find_section_by_keywords(html, ['火电', 'thermal'])
     trend_fire = _gen_fire_trend_table(report_text)
     html = insert_before_analysis(html, fid, trend_fire)
     
@@ -662,7 +743,7 @@ def _gen_weather_table(raw):
 def _gen_deviation_table(raw):
     """生成昨日偏差HTML表格"""
     if not raw: return ""
-    m = re.search(r"━━━ ⑥ 昨日偏差.*?━━━ ⑦", raw, re.DOTALL)
+    m = re.search(r"━━━ ⑥[^━]*━━━\s*(.*?)(?=━━━|$)", raw, re.DOTALL)
     if not m: return ""
     block = m.group(0)
     
@@ -692,7 +773,8 @@ def _gen_hydro_deviation(raw):
     """生成来水偏差HTML"""
     if not raw: return ""
     m = re.search(r"[⚠️✅]?\s*来水偏差:\s*([^\n]*)", raw)
-    if not m: return ""
+    if not m:
+        return '<table><tr><td>⚠️ 来水偏差：未取得（上游数据缺失）</td></tr></table>\n<div class="table-caption">📊 来水偏差</div>\n'
     line = m.group(1).strip()
     return f'<table><tr><td>⚠️ 来水偏差：{line}</td></tr></table>\n<div class="table-caption">📊 来水偏差</div>\n'
 
@@ -701,7 +783,8 @@ def _gen_sys_reserve_table(raw):
     """生成系统备用HTML表格"""
     if not raw: return ""
     m = re.search(r"⚡系统备用:\s*([^\n]*)", raw)
-    if not m: return ""
+    if not m:
+        return '<table><tr><td>⚡ 系统备用：未取得（上游数据缺失）</td></tr></table>\n<div class="table-caption">📊 系统备用</div>\n'
     return f'<table><tr><td>⚡ 系统备用：{m.group(1).strip()}</td></tr></table>\n<div class="table-caption">📊 系统备用</div>\n'
 
 
@@ -723,11 +806,15 @@ def _gen_fire_trend_table(report_text):
 def _fix_market_analysis(html, report_text):
     """替换市场参考section的analysis-box，去掉时段分解重复内容"""
     import re
-    idx = html.find('id="market-reference"')
-    if idx < 0: return html
-    box_start = html.find('<div class="analysis-box">', idx)
-    box_end = html.find('</div>', box_start) + 6
-    if box_start < 0 or box_end < 6: return html
+    sec_pos = find_section_by_keywords(html, ['市场参考', 'market'])
+    if sec_pos is None:
+        return html
+    sec_end_m = re.search(r'</section>', html[sec_pos:])
+    sec_end = sec_end_m.start() + sec_pos if sec_end_m else len(html)
+    box_start = html.find('<div class="analysis-box">', sec_pos, sec_end)
+    box_end = html.find('</div>', box_start) + 6 if box_start >= 0 else -6
+    if box_start < 0 or box_end < 6:
+        return html
     
     # 从发电侧txt取价差数据
     spot = None
@@ -742,9 +829,9 @@ def _fix_market_analysis(html, report_text):
     m = re.search(r"现货与滚动价差[：:]\s*([+\-]?\d+)", report_text)
     spread = m.group(1) if m else None
 
-    spot_str = f"{spot}元" if spot else "—"
-    rolling_str = f"{rolling}元" if rolling else "—"
-    monthly_str = f"{monthly}元" if monthly else "—"
+    spot_str = f"{spot}元" if spot else "未取得"
+    rolling_str = f"{rolling}元" if rolling else "未取得"
+    monthly_str = f"{monthly}元" if monthly else "未取得"
     # 价差方向动态生成（严禁硬编码升水/贴水方向）
     if spread is not None:
         _spread_num = int(spread)
@@ -847,6 +934,13 @@ def generate_pdf(api_key_open, api_key_code):
         if not GEN_TXT.exists():
             raise FileNotFoundError(f"发电侧txt不存在: {GEN_TXT}")
         report_text = GEN_TXT.read_text(encoding="utf-8")
+        # 源数据缺失检测（上游断档时txt含"未取得"占位）
+        _na_hits = re.findall(r'([^\s：:，。|]{2,14})[：:]?\s*未取得', report_text)
+        _na_uniq = []
+        for _f in _na_hits:
+            if _f not in _na_uniq:
+                _na_uniq.append(_f)
+        na_warning = ("⚠️ 上游数据缺失: " + "/".join(_na_uniq[:12]) + " 未取得，PDF对应位置已显式标注，请知悉") if _na_uniq else ""
         date_match = re.search(r"(\d{4}-\d{2}-\d{2})", report_text)
         date_str = date_match.group(1) if date_match else datetime.now().strftime("%Y-%m-%d")
         # 昨日日期（用于取昨日数据的API查询）
@@ -876,25 +970,28 @@ def generate_pdf(api_key_open, api_key_code):
         raw = kimi_call_with_fallback(api_key_open, api_key_code, system, user, timeout=600, max_tokens=100000)
         html = extract_html(raw)
 
-        # 完整性校验: 结构+关键数据点, 最多3次尝试 (2026-09-01新增)
+        # 完整性校验: 结构+数值一致性, 最多3次尝试
         integrity_warning = False
-        _ok, _missing, _ratio = validate_data_integrity(html, report_text)
+        integrity_detail = ""
+        _ok, _missing, _mismatch = validate_data_integrity(html, report_text)
         if not (check_html(html) and _ok):
             for attempt in range(2, 4):
-                log.warning(f"  第{attempt-1}次校验未通过: 缺{_missing or '结构'}, 数字覆盖率{_ratio:.0%}，重试...")
+                _why = _missing + _mismatch
+                log.warning(f"  第{attempt-1}次校验未通过: 缺{_missing or '无'}, 不一致{_mismatch or '无'}，重试...")
                 raw = kimi_call_with_fallback(api_key_open, api_key_code, system,
-                    user + f"\n\n【重要】上次输出缺关键数据: {_missing or '结构不完整'}。请确保以下数值出现在正文中: 均价/净缺口/水电占比/火电出力，且全部表格和section完整。",
+                    user + f"\n\n【重要】上次输出存在问题: {_why or '结构不完整'}。缺失字段必须在对应表格/摘要中原样补上；不一致字段必须改为txt【数据】中的数值，禁止编造。",
                     timeout=600, max_tokens=100000)
                 html = extract_html(raw)
-                _ok, _missing, _ratio = validate_data_integrity(html, report_text)
+                _ok, _missing, _mismatch = validate_data_integrity(html, report_text)
                 if check_html(html) and _ok:
-                    log.info(f"  完整性校验通过 (第{attempt}次, 覆盖率{_ratio:.0%})")
+                    log.info(f"  完整性校验通过 (第{attempt}次)")
                     break
             else:
                 integrity_warning = True
-                log.error(f"  ⚠️ 3次生成均未通过完整性校验(缺{_missing}, 覆盖率{_ratio:.0%})，使用最后一次输出并标注告警")
+                integrity_detail = f"缺{_missing or '无'}, 数值不一致{_mismatch or '无'}"
+                log.error(f"  ⚠️ 3次生成均未通过完整性校验({integrity_detail})，使用最后一次输出并标注告警")
         else:
-            log.info(f"  完整性校验通过 (第1次, 覆盖率{_ratio:.0%})")
+            log.info("  完整性校验通过 (第1次)")
         
         # 注入CSS
         css = CSS_PATH.read_text(encoding="utf-8") if CSS_PATH.exists() else ""
@@ -919,6 +1016,8 @@ def generate_pdf(api_key_open, api_key_code):
         
         # Step 4: caption下移
         html = move_captions(html)
+        # Step 4.1: 封面硬约束（删除编造的日前/实时市场日期行）
+        html = _fix_cover(html)
         
         # 保存HTML
         html_file = job_dir / f"gen_side_{date_short}.html"
@@ -951,6 +1050,8 @@ def generate_pdf(api_key_open, api_key_code):
             "date": date_str, "tables": html.count("<table>"),
             "charts": len(chart_files),
             "integrity_warning": integrity_warning,
+            "integrity_detail": integrity_detail,
+            "na_warning": na_warning,
         })
         
     except Exception as e:
@@ -977,12 +1078,15 @@ def main():
         sys.exit(1)
     result = generate_pdf(api_key_open, api_key_code)
     if result["success"]:
+        # 告警行最先输出，确保cron转发时醒目
+        if result.get("na_warning"):
+            print(result["na_warning"])
+        if result.get("integrity_warning"):
+            print(f"⚠️ 数据完整性校验未通过(3次重试): {result.get('integrity_detail','')}，请人工核对今日PDF关键数据")
         print(f"\n✓ 成功")
         print(f"  PDF: {result['pdf_url']}")
         print(f"  TXT: {result['txt_url']}")
         print(f"  表格: {result.get('tables',0)}张, 图表: {result.get('charts',0)}张")
-        if result.get("integrity_warning"):
-            print("⚠️ 数据完整性校验未通过(3次重试), 报告可能缺失关键数据, 请人工核对!")
 
         # OSS 上传（下游系统交付通道）
         if result.get("date"):
