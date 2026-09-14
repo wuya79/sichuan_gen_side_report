@@ -175,3 +175,10 @@
 **校验实绩**（今日7次全链路实跑）：拦截 Kimi 误抄 月度108→滚动加权、填0→昨日均价、1.3%→负荷 三次真实编造。
 
 **遗留**：DeepSeek 备用脚本 gen_side_ds_pdf.py 未同步（含旧0兜底+硬编码34666/1736），用户决定暂不管。
+
+
+## 2026-09-15 — 竞争空间解析修复（t27/t26 取值恒0 → 真值）
+- 根因: gen_txt.get_competition_data 按 fetch_data 原始结构取 p["value"]（实际结构 [{filter,data:[96字符串]}]）→ 新能源/非市场化恒按0，净缺口每天虚增 ~6411MW、判词反向（09-13 实测）。
+- 修复: 改用既有 wrapper get_renewable_forecast / get_nim_forecast + 均值直算（6行）；py_compile 通过。
+- 验收: 09-13 重算 re=2895.1 / nim=3516.5（与审计真值一致）；gap 恒等式断言通过。
+- 回滚: git revert 本提交（改前版=5784439）。

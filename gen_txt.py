@@ -138,19 +138,19 @@ def get_competition_data(date_str):
             load = ra.get_actual_load(d2)
             if load:
                 log.info(f"  竞争空间负荷使用D-2({d2})，接口暂不可用")
-        re = ra.fetch_data(27, date_str)
-        nim = ra.fetch_data(26, date_str)
+        re = ra.get_renewable_forecast(date_str)
+        nim = ra.get_nim_forecast(date_str)
         if not hydro or not load:
             return []
         hydro_pts = hydro.get("points", [])
         load_pts = load.get("points", [])
-        re_pts = re.get("data", []) if re and isinstance(re, dict) else []
-        nim_pts = nim.get("data", []) if nim and isinstance(nim, dict) else []
+        re_pts = re.get("points", []) if re and isinstance(re, dict) else []
+        nim_pts = nim.get("points", []) if nim and isinstance(nim, dict) else []
         if len(hydro_pts) < 96 or len(load_pts) < 96:
             return []
         # 新能源和非市场化可能没有96点数据，降级为日均值
-        re_avg = sum(p.get("value", 0) for p in re_pts if isinstance(p, dict) and p.get("value")) / max(len(re_pts), 1) if re_pts else 0
-        nim_avg = sum(p.get("value", 0) for p in nim_pts if isinstance(p, dict) and p.get("value")) / max(len(nim_pts), 1) if nim_pts else 0
+        re_avg = sum(re_pts) / len(re_pts) if re_pts else 0
+        nim_avg = sum(nim_pts) / len(nim_pts) if nim_pts else 0
         hourly = []
         for h in range(24):
             h_load = sum(load_pts[h*4:(h+1)*4]) / 4
