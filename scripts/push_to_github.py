@@ -65,21 +65,28 @@ print(f"  changed/added: {len(changed)}, deleted: {len(deleted)}")
 for p in list(changed.keys())[:10]:
     status = "new" if p not in remote_blobs else "modified"
     print(f"    {status}: {p}")
+# 保险(2026-09-16): 空解析/异常大变更 → abort (防误写)
+if not local_blobs:
+    raise SystemExit("本地文件解析为空, abort")
+if len(changed) > 150:
+    raise SystemExit(f"变更文件数异常({len(changed)}), abort")
 
 # Step 5
 if changed:
     print(f"\n=== Step 5: Upload {len(changed)} blobs ===")
     for i, (path, sha) in enumerate(changed.items()):
-        raw = subprocess.run(f"git cat-file -p {sha}", capture_output=True, shell=True, cwd=CWD).stdout
-        if not raw:
-            print(f"  skip empty: {path}")
-            continue
+        r = subprocess.run(f"git cat-file -p {sha}", capture_output=True, shell=True, cwd=CWD)
+        if r.returncode != 0:
+            raise SystemExit(f"cat-file失败 {path}, abort")
+        raw = r.stdout
         try:
             text = raw.decode("utf-8")
-            api("POST", "git/blobs", {"content": text, "encoding": "utf-8"})
+            blob = api("POST", "git/blobs", {"content": text, "encoding": "utf-8"})
         except UnicodeDecodeError:
             b64 = base64.b64encode(raw).decode()
-            api("POST", "git/blobs", {"content": b64, "encoding": "base64"})
+            blob = api("POST", "git/blobs", {"content": b64, "encoding": "base64"})
+        if not blob or blob.get("sha") != sha:
+            raise SystemExit(f"blob校验失败 {path}: {blob and blob.get('sha')}, abort")
         if (i+1) % 30 == 0:
             print(f"  {i+1}/{len(changed)}")
 else:
