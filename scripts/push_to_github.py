@@ -43,11 +43,18 @@ print("\n=== Step 3: 本地文件 ===")
 local_tree_sha = sh("git rev-parse HEAD^{tree}")
 local_blobs = {}
 local_modes = {}
-for line in sh(f"git ls-tree -r {local_tree_sha}").split('\n'):
-    parts = line.split(None, 3)
-    if len(parts) >= 4 and parts[1] == "blob":
-        local_blobs[parts[3]] = parts[2]
-        local_modes[parts[3]] = parts[0]
+# 2026-09-16修复: -z 解析(中文路径转义bug, 同 api_push.py)
+rawz = subprocess.run(["git", "ls-tree", "-r", "-z", local_tree_sha],
+                      capture_output=True, cwd=CWD).stdout
+for ent in rawz.split(b"\0"):
+    if not ent:
+        continue
+    meta, _path = ent.split(b"\t", 1)
+    mode, typ, sha = meta.decode().split()
+    if typ == "blob":
+        _p = _path.decode("utf-8")
+        local_blobs[_p] = sha
+        local_modes[_p] = mode
 print(f"  {len(local_blobs)} files, tree={local_tree_sha[:8]}")
 
 # Step 4
