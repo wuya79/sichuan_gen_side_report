@@ -424,7 +424,7 @@ def gen_txt():
     lines.append(f"综合来水指数：{_disp(wi_val, '')} — {wi_desc if wi_desc else '未取得'}")
     basin_line = ext(raw, r"流域:.*$", "", flags=re.MULTILINE)
     if basin_line: lines.append(basin_line)
-    ws = block(raw, "蓄放水状态", "━━━", offset=10)
+    ws = block(raw, "蓄放水状态", "━━━", offset=7)  # 2026-09-23修复: 10→7 (10恰好吃掉首行站名"瀑布沟"3字; 详见skill陷阱35)
     if ws:
         lines.append("")
         for sl in ws.split("\n")[:8]:
