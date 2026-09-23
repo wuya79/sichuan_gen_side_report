@@ -120,6 +120,8 @@ def validate_data_integrity(html, report_text):
     规则: ①源为"未取得"→HTML必须也是"未取得"(填数字=编造);
           ②源为数字→HTML必须同值(编造/抄错=不一致);
           ③源字段缺失(txt格式变化)→计入缺失防静默失效。
+    2026-09-23 v2.1: 一致性比对改为"任意同名出现命中即过"（修复相邻指标值误取误报，如
+          "水电出力超过负荷／火电日均出力2026MW"把2026误当负荷值）；缺失逻辑不变。
     Returns: (ok, missing, mismatched)
     """
     _fields = ['昨日均价', '净缺口', '水电占比', '火电日均出力', '负荷', '滚动加权', '月度交易价格']
@@ -127,16 +129,17 @@ def validate_data_integrity(html, report_text):
     _body = re.sub(r'<div[^>]*class="toc-page"[^>]*>.*?(?=<section)', ' ', html, flags=re.S)
     plain = re.sub(r'<[^>]+>', ' ', _body)
 
-    def _val_after(text, name, maxlen=60, prefix_exclude=''):
-        """定位字段名，取其后首个数值或'未取得'（先剥括号注释，防'D+2'干扰）。
-        跳过目录页等无值出现位置，取第一个真正带值的出现。
-        跳过目录页码形态（3+点号后跟数字），防页码被当字段值。
-        prefix_exclude: 字段名前缀排除集（如'负荷'排除'占负荷/净负荷'撞车）。"""
+    def _vals_after(text, name, maxlen=60, prefix_exclude=''):
+        """收集字段名【所有】出现位置的取值（先剥括号注释，防'D+2'干扰）。
+        跳过目录页等无值出现位置；跳过目录页码形态（3+点号后跟数字），防页码被当字段值。
+        prefix_exclude: 字段名前缀排除集（如'负荷'排除'占负荷/净负荷'撞车）。
+        2026-09-23: 由"取首个出现"改为"收集全部出现"，配合下方任意命中比对。"""
+        vals = []
         start = 0
         while True:
             i = text.find(name, start)
             if i < 0:
-                return None
+                return vals
             if prefix_exclude and i > 0 and text[i - 1] in prefix_exclude:
                 start = i + 1  # 撞车前缀（如"占负荷"），跳过
                 continue
@@ -148,7 +151,7 @@ def validate_data_integrity(html, report_text):
                 if v != '未取得' and re.search(r'\.{3,}\s*$', tail[:m.start()]):
                     start = i + 1  # 数字前紧邻点号串=目录页码，跳过
                     continue
-                return v
+                vals.append(v)
             start = i + 1
 
     def _norm(v):
@@ -165,17 +168,21 @@ def validate_data_integrity(html, report_text):
     missing, mismatched = [], []
     for name in _fields:
         _prefix = '占净' if name == '负荷' else ''
-        v_src = _val_after(report_text, name, prefix_exclude=_prefix)
-        if v_src is None:
+        _src_vals = _vals_after(report_text, name, prefix_exclude=_prefix)
+        if not _src_vals:
             log.warning(f"  [校验] txt中未找到{name}字段(格式可能变化), 计入缺失防静默失效")
             missing.append(name)
             continue
-        v_html = _val_after(plain, name, prefix_exclude=_prefix)
-        if v_html is None:
+        v_src = _src_vals[0]
+        _html_vals = _vals_after(plain, name, prefix_exclude=_prefix)
+        if not _html_vals:
             missing.append(name)
             continue
-        if _norm(v_src) != _norm(v_html):
-            mismatched.append(f"{name}(txt={v_src},html={v_html})")
+        # 2026-09-23 修复误报：旧版只比对"首个出现"的值，html里同名首个出现的首数字
+        #   可能是相邻指标的值（如"水电出力超过负荷／火电日均出力2026MW"→误取2026）。
+        #   改为：任意同名出现命中txt值即通过（负向：全部出现都不命中→仍报不一致）。
+        if not any(_norm(v) == _norm(v_src) for v in _html_vals):
+            mismatched.append(f"{name}(txt={v_src},html={_html_vals[0]})")
     return (len(missing) == 0 and len(mismatched) == 0), missing, mismatched
 
 
@@ -532,7 +539,7 @@ def build_prompt(report_text, chart_files):
 - 趋势研判：300-500字。7日趋势分析，给出看多/看空/持平的判断
 - 月内交易：300-500字。期现价差反映的市场预期，对后续合约价格的判断
 - 检修信息：300-500字。在修设备对可用容量和送出能力的限制
-- 竞争空间：300-500字。聚焦驱动力分析（光伏大发、晚峰负荷等），不要重复时段分解，给出火电出力安排建议
+- 竞争空间：300-500字。聚焦数据反映的驱动力（如光伏出力、晚峰负荷的逐时变化，方向以数据为准），不要重复时段分解，给出火电出力安排建议
 - 市场参考：300-500字。从交易策略角度研判：①期现价差含义 ②丰水期交易策略建议 ③风险预警
 
 【核心设计原则 - 表格精简】
@@ -549,8 +556,8 @@ def build_prompt(report_text, chart_files):
 【数字溯源 - 硬约束】
 正文、表格、分析框中出现的关键数据数值（价格、出力、占比、缺口、水位、水量、气温等）必须能在下方【数据】原文中找到出处（允许单位换写，不允许数值变化）。分析需要引用某个缺失数据时，必须写"数据未取得，无法判断"，严禁猜测具体数值。字段名称必须与【数据】原文保持一致（如"昨日均价""净缺口""水电占比""火电日均出力"），不得改写为其他叫法。
 
-参考风格：
-【核心研判】丰水期格局延续。水电占比高位满发运行，供给整体宽松。火电开机维持低位，日均出力偏低。现货均价与月内滚动均价之间存在价差——分析框必须依据数据表中给出的实际价差方向（升水=滚动高于现货，贴水=滚动低于现货）如实描述，严禁写与数据相反的方向。
+参考风格（仅示意结构；所有方向性描述必须以【数据】表内实际数值为准，严禁照抄示例措辞）：
+【核心研判】先给结论，再给数据依据。水电占比、火电开机等水平描述必须与数据表数值一致；"宽松/偏紧""高位/低位""升水/贴水"等方向词只能依据数据推导，严禁写与数据相反的方向（升水=滚动高于现货，贴水=滚动低于现货）。
 
 生成后请自检：表格是否达到25张以上？每个分析框字数是否达标？"""
 
@@ -749,11 +756,11 @@ def _gen_deviation_table(raw):
     
     rows = ""
     items = [
-        ("⚡ 负荷", r"负荷:\s*实际(\d+)MW\s*预测(\d+)\s*偏差([-\d.]+)%"),
-        ("💧 水电", r"水电:\s*实际(\d+)MW\s*预测(\d+)\s*偏差([-\d.]+)%"),
+        ("⚡ 负荷", r"负荷:\s*实际(\d+)MW\s*预测(\d+)\s*偏差([+\-]?[\d.]+)%"),
+        ("💧 水电", r"水电:\s*实际(\d+)MW\s*预测(\d+)\s*偏差([+\-]?[\d.]+)%"),
         ("🔥 火电", r"火电:\s*实际(\d+)MW"),
-        ("☀️ 光伏", r"光伏:\s*实际(\d+)MW\s*预测(\d+)\s*偏差([-\d.]+)%"),
-        ("💨 风电", r"风电:\s*实际(\d+)MW\s*预测(\d+)\s*偏差([+\d.]+)%"),
+        ("☀️ 光伏", r"光伏:\s*实际(\d+)MW\s*预测(\d+)\s*偏差([+\-]?[\d.]+)%"),
+        ("💨 风电", r"风电:\s*实际(\d+)MW\s*预测(\d+)\s*偏差([+\-]?[\d.]+)%"),
         ("🏭 非市场化", r"非市场化:\s*实际(\d+)MW\s*预测(\d+)"),
     ]
     for label, pat in items:
@@ -763,7 +770,9 @@ def _gen_deviation_table(raw):
             actual = g[0]
             forecast = g[1] if len(g) >= 2 else "—"
             dev = g[2] if len(g) >= 3 else "—"
-            rows += f"<tr><td>{label}</td><td>{actual}MW</td><td>{forecast}MW</td><td>{dev}</td></tr>\n"
+            fc_cell = f"{forecast}MW" if forecast != "—" else "—"
+            dv_cell = f"{dev}%" if dev != "—" else "—"
+            rows += f"<tr><td>{label}</td><td>{actual}MW</td><td>{fc_cell}</td><td>{dv_cell}</td></tr>\n"
     
     if not rows: return ""
     return '<table><thead><tr><th>项目</th><th>实际值</th><th>预测值</th><th>偏差</th></tr></thead><tbody>\n' + rows + '</tbody></table>\n<div class="table-caption">📊 昨日偏差分析</div>\n'
