@@ -345,14 +345,13 @@ def gen_txt():
     # 趋势数据
     trend_days = ext(raw, r"📈\s*趋势\(.*?\):\s*([\d→%↑↓↑]+)", "")
 
-    # 近7日日期标签：5.3火电开机趋势=今天终点(含今日数据)；
-    # 六板块趋势仪表盘序列来自售电侧⑤趋势盘=昨天终点(今日电价未出)
+    # 近7日日期标签（2026-09-27统一）：5.3火电开机趋势与六板块仪表盘均为"截至昨日"终点
+    # （售电③ 📈 趋势行已同步改截至昨日；防同日重跑漂移 + 与数值审计G11口径一致）
     try:
         _dt = datetime.strptime(date_str, "%Y-%m-%d") if '-' in date_str else datetime.now()
     except (ValueError, TypeError):
         _dt = datetime.now()
-    _trend_dates = [(_dt - timedelta(days=i)).strftime("%m-%d") for i in range(6, -1, -1)]
-    _trend_date_str = "  ".join(_trend_dates)
+    # （2026-09-27）原"含今日"日期标签 _trend_dates/_trend_date_str 已废弃，统一用 _six_dates
     _dt6 = _dt - timedelta(days=1)
     _six_dates = [(_dt6 - timedelta(days=i)).strftime("%m-%d") for i in range(6, -1, -1)]
     _six_date_str = "  ".join(_six_dates)
@@ -659,10 +658,11 @@ def gen_txt():
     lines.append("")
     lines.append("【数据表:火电开机趋势】")
     lines.append("5.3 火电开机趋势（近7日）")
-    lines.append(_trend_date_str)
+    lines.append(_six_date_str)  # 2026-09-27统一：窗口截至昨日
     if trend_days:
         parts_t = trend_days.split("→")
-        lines.append("  ".join(p.strip() for p in parts_t[:7]) + f"（{_disp(thermal_units, '台')}）")
+        # 2026-09-27：序列改截至昨日，去掉原"（今日N台）"后缀避免与序列末日混淆
+        lines.append("  ".join(p.strip() for p in parts_t[:7]))
     else:
         # 数据缺失：显式未取得（禁止硬编码兜底值）
         lines.append(f"⚠️ 火电开机趋势数据未取得（上游数据缺失），本表暂不提供")
