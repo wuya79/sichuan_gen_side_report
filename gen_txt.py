@@ -89,6 +89,30 @@ def _spread_str(v):
     return "持平"
 
 
+# 水期 →（月份区间, 调度原则）映射（2026-09-30 修复跨月硬编码）
+_SEASON_PRINCIPLE = {
+    "丰水期": ("6-9月", "优先不弃水"),
+    "蓄水期": ("10-11月", "全力蓄水"),
+    "平水期": ("5月", "缓消快蓄"),
+    "枯水期": ("1-4月/12月", "平稳消落"),
+}
+
+
+def _season_by_date(ds):
+    """按日期兜底判断水期（四期制：枯1-4/12 平5 丰6-9 蓄10-11；2026-09-30 修复跨月硬编码）"""
+    try:
+        m = int(str(ds)[5:7])
+    except (ValueError, IndexError):
+        m = datetime.now().month
+    if m in (6, 7, 8, 9):
+        return "丰水期"
+    if m in (10, 11):
+        return "蓄水期"
+    if m == 5:
+        return "平水期"
+    return "枯水期"
+
+
 def block(raw, start, end=None, offset=0):
     """提取文本块"""
     si = raw.find(start)
@@ -284,7 +308,9 @@ def gen_txt():
     thermal_cap = ext(raw, r"开机\d+台/(\d+)MW", "")
     thermal_stop = ext(raw, r"停机\d+台/(\d+)MW", "")
     thermal_util = ext(raw, r"利用率([\d.]+)%", "")
-    season = ext(raw, r"(丰水期|平水期|枯水期|蓄水期)", "丰水期")
+    season = ext(raw, r"(丰水期|平水期|枯水期|蓄水期)", "")
+    if season not in _SEASON_PRINCIPLE:  # 提取失败/异常 → 按日期兜底（2026-09-30 修复）
+        season = _season_by_date(date_str)
     load_avg = ext(raw, r"日均(\d+)MW", "")
     hydro_avail = ext(raw, r"水电(\d+)MW\s*\([\d.]+%\)", "")
     re_avg = ext(raw, r"新能源(\d+)MW", "")
@@ -373,7 +399,8 @@ def gen_txt():
     # ── 标题 ──
     lines.append(f"# 四川燃煤电厂发电侧交易日报")
     lines.append(f"# {date_str}（{wd_cn}）")
-    lines.append(f"# 水期：{season}（6-9月）调度原则：优先不弃水")
+    _sr, _sp = _SEASON_PRINCIPLE.get(season, ("6-9月", "优先不弃水"))
+    lines.append(f"# 水期：{season}（{_sr}）调度原则：{_sp}")
     lines.append("")
 
     # ── 一、核心指标摘要 ──
@@ -411,7 +438,8 @@ def gen_txt():
     # ── 二、水情监测 ──
     lines.append("二、水情监测")
     lines.append("")
-    lines.append(f"当前处于{season}（6-9月），调度原则为\"优先不弃水\"。")
+    _sr, _sp = _SEASON_PRINCIPLE.get(season, ("6-9月", "优先不弃水"))
+    lines.append(f"当前处于{season}（{_sr}），调度原则为\"{_sp}\"。")
     lines.append("")
     lines.append("2.1 重点水库水位")
     wp = block(raw, "【水位压力】", "【水情研判】")
