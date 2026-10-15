@@ -178,12 +178,18 @@ def get_competition_data(date_str):
         if len(hydro_pts) < 96 or len(load_pts) < 96:
             return []
         # 新能源和非市场化可能没有96点数据，降级为日均值
-        re_avg = sum(re_pts) / len(re_pts) if re_pts else 0
-        nim_avg = sum(nim_pts) / len(nim_pts) if nim_pts else 0
+        _re_v = [v for v in re_pts if v is not None]
+        _nim_v = [v for v in nim_pts if v is not None]
+        re_avg = sum(_re_v) / len(_re_v) if _re_v else 0
+        nim_avg = sum(_nim_v) / len(_nim_v) if _nim_v else 0
         hourly = []
         for h in range(24):
-            h_load = sum(load_pts[h*4:(h+1)*4]) / 4
-            h_hydro = sum(hydro_pts[h*4:(h+1)*4]) / 4
+            _l4 = [v for v in load_pts[h*4:(h+1)*4] if v is not None]
+            _h4 = [v for v in hydro_pts[h*4:(h+1)*4] if v is not None]
+            if len(_l4) < 4 or len(_h4) < 4:
+                continue  # 2026-10-16: 该小时数据不完整则跳过，防None整段崩
+            h_load = sum(_l4) / 4
+            h_hydro = sum(_h4) / 4
             # 新能源和非市场化用日均值近似（逐时数据不可靠）
             gap = h_load - h_hydro - re_avg - nim_avg
             pct = round(h_hydro / h_load * 100) if h_load > 0 else 0
