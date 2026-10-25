@@ -300,9 +300,9 @@ def gen_txt():
                     if _per in _seg and _v.get("platform_price"):
                         _seg[_per].append(_v["platform_price"])
                 if all(_seg[k] for k in _seg):
-                    _mp_avg = (sum(_seg["谷段"]) / len(_seg["谷段"])
-                               + sum(_seg["平段"]) / len(_seg["平段"])
-                               + sum(_seg["高峰段"]) / len(_seg["高峰段"])) / 3
+                    # 2026-10-25（批次D）：原为三段均值再平均(未加权)，三段小时数不等 → 改按小时数加权
+                    _n_all = sum(len(_seg[k]) for k in _seg)
+                    _mp_avg = sum(sum(_seg[k]) for k in _seg) / _n_all
                 else:
                     _vals = [v["platform_price"] for v in _mp_prices.values() if v.get("platform_price")]
                     _mp_avg = sum(_vals) / len(_vals) if _vals else None
