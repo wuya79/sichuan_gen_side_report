@@ -386,6 +386,21 @@ def gen_txt():
     # （2026-09-27）原"含今日"日期标签 _trend_dates/_trend_date_str 已废弃，统一用 _six_dates
     _dt6 = _dt - timedelta(days=1)
     _six_dates = [(_dt6 - timedelta(days=i)).strftime("%m-%d") for i in range(6, -1, -1)]
+    # 2026-10-29：售电⑤面板已改为"表头=数据实际窗口"（昨日实际未回填时整体退至D-2），
+    # 发电侧跟随售电表头，避免复制了数据却标错日期（原按日历固定生成）
+    _m6d = re.search(r'趋势仪表盘（(\d{2}-\d{2})~(\d{2}-\d{2})', raw or "")
+    if _m6d:
+        try:
+            _y6 = _dt.year
+            _a6 = datetime.strptime(f"{_y6}-{_m6d.group(1)}", "%Y-%m-%d")
+            _b6 = datetime.strptime(f"{_y6}-{_m6d.group(2)}", "%Y-%m-%d")
+            if _b6 < _a6:
+                _b6 = _b6.replace(year=_y6 + 1)
+            _n6 = (_b6 - _a6).days + 1
+            if 2 <= _n6 <= 14:
+                _six_dates = [(_a6 + timedelta(days=i)).strftime("%m-%d") for i in range(_n6)]
+        except Exception:
+            pass
     _six_date_str = "  ".join(_six_dates)
     _six_range = f"{_six_dates[0]}~{_six_dates[-1]}"
     
