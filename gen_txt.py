@@ -293,6 +293,11 @@ def gen_txt():
                 _mp_data = _json2.load(_f)
             _this_month = datetime.now().strftime("%Y-%m")
             _mp_prices = _mp_data.get(_this_month, {}).get("prices", {})
+            if not _mp_prices:
+                # 2026-11-01: 11月起人工只录入成交均价(无24时段明细) → 单值兜底
+                _mp_fb = _mp_data.get(_this_month, {}).get("average")
+                if _mp_fb:
+                    monthly_price = f"{float(_mp_fb):.0f}"
             if _mp_prices:
                 _seg = {"谷段": [], "平段": [], "高峰段": []}
                 for _v in _mp_prices.values():
