@@ -540,7 +540,7 @@ def build_prompt(report_text, chart_files):
 - 月内交易：300-500字。期现价差反映的市场预期，对后续合约价格的判断
 - 检修信息：300-500字。在修设备对可用容量和送出能力的限制
 - 竞争空间：300-500字。聚焦数据反映的驱动力（如光伏出力、晚峰负荷的逐时变化，方向以数据为准），不要重复时段分解，给出火电出力安排建议
-- 市场参考：300-500字。从交易策略角度研判：①期现价差含义 ②丰水期交易策略建议 ③风险预警
+- 市场参考：300-500字。从交易策略角度研判：①期现价差含义 ②当前水期交易策略建议 ③风险预警
 
 【核心设计原则 - 表格精简】
 {chart_rules_text}
@@ -855,8 +855,29 @@ def _fix_market_analysis(html, report_text):
         _spread_desc = "期现价差方向以数据表为准"
         spread_str = "—"
 
+    # 2026-11-07：末句改为数据驱动。原硬编码"丰水期火电竞争空间有限，建议保持最小开机"
+    #   与正文"净缺口+9724MW、火电有稳定竞争空间"自相矛盾，且11月是蓄水期。
+    #   本段是 HTML 后处理（不经过 Kimi），确定性替换，不存在生成漂移。
+    _season = "当前水期"
+    _m_season = re.search(r"水期[：:]\s*([\u4e00-\u9fa5]+?)[（(]", report_text)
+    if _m_season:
+        _season = _m_season.group(1)
+    _gap = None
+    _m_gap = re.search(r"净缺口[：:]\s*([+\-]?\d+)MW", report_text)
+    if _m_gap:
+        try:
+            _gap = int(_m_gap.group(1))
+        except ValueError:
+            _gap = None
+    if _gap is not None and _gap > 0:
+        _strat = f"今日净缺口+{_gap}MW，{_season}供给偏紧，火电有竞争空间，建议顶峰出力、争取边际高价"
+    elif _gap is not None:
+        _strat = f"今日净缺口{_gap}MW，{_season}供给过剩，火电竞争空间有限，建议最小开机、控制成本"
+    else:
+        _strat = f"{_season}供需缺口未取得，建议按机组成本与顶峰能力灵活安排"
+
     new_box = f"""<div class="analysis-box">
-        <p>【市场综合研判】全天均价{spot_str}/MWh，现货与滚动均价{rolling_str}价差{spread_str}，{_spread_desc}。丰水期火电竞争空间有限，建议保持最小开机状态，关注来水变化信号带来的市场格局变化。{'月度交易价格' + monthly_str + '可作远期合约定价参考。' if monthly else ''}</p>
+        <p>【市场综合研判】全天均价{spot_str}/MWh，现货与滚动均价{rolling_str}价差{spread_str}，{_spread_desc}。{_strat}，关注来水变化信号带来的市场格局变化。{'月度交易价格' + monthly_str + '可作远期合约定价参考。' if monthly else ''}</p>
     </div>"""
     
     return html[:box_start] + new_box + html[box_end:]
