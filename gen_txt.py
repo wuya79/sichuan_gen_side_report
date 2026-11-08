@@ -449,9 +449,15 @@ def gen_txt():
     lines.append(f"负荷               {_disp(load_avg, ' MW')}")
     lines.append(f"月内滚动均价         {_disp(rolling_avg)}")
     lines.append("")
-    # 超汛限电站（精简格式"站名+幅度"；2026-09-23审计修复：旧版整行源文塞入）
-    _exc = re.findall(r"·([\u4e00-\u9fff]+)\([^)]*\)\s*水位[^\s]+\s*超汛限([+\-]?\d+)m", raw)
-    exceed_str = " / ".join(f"{_n}{_d}m" for _n, _d in _exc[:3]) if _exc else ""
+    # 2026-11-08：蓄水期不再用"超汛限"判断（水位高于汛限是常态）。
+    # 取自 2.2 蓄放水块的"蓄水"站与幅度，作为重要变化(4)。
+    _ws_blk = block(raw, "蓄放水状态", "━━━", offset=7)
+    _prog = []
+    for _ln in (_ws_blk or "").split("\n"):
+        _m = re.match(r"^(\S+)\s+→\s+([蓄放]水)(?:\([^)]*\))?\s+([+-][\d.]+)万m³", _ln.strip())
+        if _m and _m.group(2) == "蓄水":
+            _prog.append(f"{_m.group(1)}{_m.group(3)}万m³")
+    exceed_str = " / ".join(_prog[:2]) if _prog else ""
     # 火电开机趋势是否连续持平（从源txt趋势数据动态判断）
     _fire_vals = [x.strip() for x in trend_days.split("→")] if trend_days else []
     _fire_flat = "连续7日持平" if _fire_vals and len(set(_fire_vals)) == 1 else ""
@@ -477,7 +483,7 @@ def gen_txt():
     lines.append(f"综合来水指数：{_disp(wi_val, '')} — {wi_desc if wi_desc else '未取得'}")
     basin_line = ext(raw, r"流域:.*$", "", flags=re.MULTILINE)
     if basin_line: lines.append(basin_line)
-    ws = block(raw, "蓄放水状态", "━━━", offset=7)  # 2026-09-23修复: 10→7 (10恰好吃掉首行站名"瀑布沟"3字; 详见skill陷阱35)
+    ws = _ws_blk  # 2026-11-08: 与重要变化(4)共用同一块
     if ws:
         lines.append("")
         for sl in ws.split("\n")[:8]:
@@ -497,14 +503,21 @@ def gen_txt():
     lines.append("【数据表:天气前瞻】未来72小时流域降雨数据")
     lines.append("水情研判：")
     lines.append(f"综合来水指数{_disp(wi_val, '')}{wi_desc or '未取得'}，大渡河、雅砻江为双主驱动力。")
-    near_limit = re.findall(r"[🌊]?(大渡河|雅砻江|嘉陵江|岷江|涪江|金沙江)[·.]([\u4e00-\u9fff]+)\(.*?\).*?(距汛限[-\d]+m|超汛限[+\d]+m)", raw)
-    for river, name, status in near_limit[:5]:
-        if "超汛限" in status:
-            lines.append(f"{river}·{name}{status}已开始放水，关注后续影响。")
-        elif int(ext(status, r"(\d+)", "99")) <= 3 and "距" in status:
-            if name in ["瀑布沟","猴子岩","大岗山"]:
-                lines.append(f"{river}·{name}蓄容已接近100%，若持续来水可能被迫加大放水。")
-    lines.append("整体来看，来水充沛使水电持续满发，火电竞争空间被压缩至极限。")
+    # 2026-11-08：原"超汛限→已开始放水"在蓄水期是反的；改为直接引用 2.2 蓄放水状态。
+    for _ln in (_ws_blk or "").split("\n"):
+        _m = re.match(r"^(\S+)\s+→\s+([蓄放]水)(?:\([^)]*\))?\s+([+-][\d.]+)万m³", _ln.strip())
+        if _m:
+            lines.append(f"{_m.group(1)}{_m.group(2)}{_m.group(3)}万m³，关注后续影响。")
+    try:
+        _wi = float(wi_val)
+    except (TypeError, ValueError):
+        _wi = None
+    if _wi is not None and _wi < 0.30:
+        lines.append("整体来看，来水偏枯，水电出力受限，火电竞争空间扩大。")
+    elif _wi is not None and _wi > 0.60:
+        lines.append("整体来看，来水充沛，水电满发，火电竞争空间被压缩。")
+    else:
+        lines.append("整体来看，来水中性，水电与火电竞争并存。")
     if weather_block:
         rain_items = re.findall(r"(\S+)\s+([\d.]+)mm\s+", weather_block)
         for rn, rm in rain_items:
