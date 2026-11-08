@@ -207,8 +207,50 @@ def move_captions(html):
 
 def _fix_cover(html):
     """封面硬约束：删除LLM擅自添加的'日前市场/实时市场'日期行(2026-09-02用户发现编造日期)。
-    用tempered dot防止跨标签吞并相邻的'报告周期'行。"""
-    return re.sub(r'<p[^>]*>(?:(?!</p>).)*?(?:日前市场|实时市场)(?:(?!</p>).)*?</p>\s*', '', html, flags=re.S)
+    用tempered dot防止跨标签吞并相邻的'报告周期'行。
+    2026-11-08：封面恢复上一版样式——白底、标题、细横线、三行元数据（编制单位/水期/报告周期），
+    去掉副标题/彩色色块；只改封面，不动正文与图表。
+    """
+    html = re.sub(r'<p[^>]*>(?:(?!</p>).)*?(?:日前市场|实时市场)(?:(?!</p>).)*?</p>\s*', '', html, flags=re.S)
+    _start = html.find('<div class="cover"')
+    if _start < 0:
+        return html
+    _depth, _i, _end = 0, _start, -1
+    while _i < len(html):
+        if html.startswith('<div', _i):
+            _depth += 1
+        elif html.startswith('</div', _i):
+            _depth -= 1
+            if _depth == 0:
+                _end = html.find('>', _i) + 1
+                break
+        _i += 1
+    if _end < 0:
+        return html
+    _cover = html[_start:_end]
+    _tm = re.search(r'<div[^>]*class="cover-title"[^>]*>(.*?)</div>', _cover, re.S)
+    _title = _tm.group(1).strip() if _tm else '四川燃煤电厂发电侧交易日报'
+    _ps = re.findall(r'<p[^>]*>(.*?)</p>', _cover, re.S)
+
+    def _pick(kw):
+        for _p in _ps:
+            if kw in _p:
+                _s = re.sub(r'<[^>]+>', '', _p).replace('&nbsp;', ' ')
+                _s = re.sub(r'\s*\|\s*', ' ', _s)
+                return re.sub(r'\s+', ' ', _s).strip()
+        return ''
+
+    _org = _pick('编制单位') or '编制单位：发电侧交易分析组'
+    _water = _pick('水期') or ''
+    _date = _pick('报告周期') or ''
+    _meta = [x for x in (_org, _water, _date) if x]
+    _new = ('<div class="cover">\n  <div class="cover-content">\n'
+            f'    <div class="cover-title">{_title}</div>\n'
+            '    <hr class="cover-line">\n'
+            '    <div class="cover-meta">\n' +
+            ''.join(f'      <p>{_x}</p>\n' for _x in _meta) +
+            '    </div>\n  </div>\n</div>')
+    return html[:_start] + _new + html[_end:]
 
 
 # ─── 图表定义（build_prompt & inject_chart_refs 共用）─────
@@ -577,7 +619,7 @@ def build_prompt(report_text, chart_files):
 4. 在对应section中引用以下图表（禁止使用其他文件名）：
 {chart_instructions_text}
 5. 所有单元格填入实际数据
-6. 【重要】封面页只允许一行日期信息："报告周期：{cover_date_str}"。严禁在封面写"日前市场""实时市场"或任何其他日期/市场字样（封面其余内容只允许：报告标题、编制单位、水期与调度原则）
+6. 【重要】封面用上一版白底样式：只允许 报告标题 + 一条细横线 + 三行元数据（编制单位、水期与调度原则、报告周期）；禁止副标题（如“发电侧运营与交易策略分析”）、彩色背景、红框/色块、图标。日期只允许“报告周期：{cover_date_str}”，严禁在封面写“日前市场”“实时市场”或任何其他日期/市场字样。
 
 【数据】
 {report_text[:15000]}
