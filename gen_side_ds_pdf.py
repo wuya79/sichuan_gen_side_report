@@ -59,11 +59,11 @@ def main():
 
     # 解析数据
     data = {}
-    m = re.search(r"均价(\d+)", report_text)
+    m = re.search(r"昨日均价\s*[：:]?\s*(\d+)", report_text)
     data["avg_price"] = int(m.group(1)) if m else 0
     m = re.search(r"水电(?:占比|占负荷)\s*[：:]?\s*(\d+)\s*%", report_text)
     data["hydro_pct"] = int(m.group(1)) if m else 0
-    m = re.search(r"净缺口\s*([-\d,]+)", report_text)
+    m = re.search(r"净缺口\s*[：:]?\s*([+\-]?\d[\d,]*)", report_text)
     data["net_gap"] = int(m.group(1).replace(",","")) if m else 0
     m = re.search(r"火电日均出力\s*[：:]\s*(\d+)", report_text)
     data["fire_avg"] = int(m.group(1)) if m else 0

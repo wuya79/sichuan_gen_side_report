@@ -124,7 +124,10 @@ def validate_data_integrity(html, report_text):
           "水电出力超过负荷／火电日均出力2026MW"把2026误当负荷值）；缺失逻辑不变。
     Returns: (ok, missing, mismatched)
     """
-    _fields = ['昨日均价', '净缺口', '水电占负荷', '火电日均出力', '负荷', '滚动加权', '月度交易价格']
+    _fields = [('昨日均价', ('昨日均价',)), ('净缺口', ('净缺口',)),
+               ('水电占负荷', ('水电占负荷', '水电占比')),
+               ('火电日均出力', ('火电日均出力',)), ('负荷', ('负荷',)),
+               ('滚动加权', ('滚动加权',)), ('月度交易价格', ('月度交易价格',))]
     # HTML侧剔除目录页（页码会被误当字段值），再剥标签
     _body = re.sub(r'<div[^>]*class="toc-page"[^>]*>.*?(?=<section)', ' ', html, flags=re.S)
     plain = re.sub(r'<[^>]+>', ' ', _body)
@@ -166,15 +169,19 @@ def validate_data_integrity(html, report_text):
             return s
 
     missing, mismatched = [], []
-    for name in _fields:
+    for name, aliases in _fields:
         _prefix = '占净' if name == '负荷' else ''
-        _src_vals = _vals_after(report_text, name, prefix_exclude=_prefix)
+        _src_vals = []
+        for _alias in aliases:
+            _src_vals += _vals_after(report_text, _alias, prefix_exclude=_prefix)
         if not _src_vals:
             log.warning(f"  [校验] txt中未找到{name}字段(格式可能变化), 计入缺失防静默失效")
             missing.append(name)
             continue
         v_src = _src_vals[0]
-        _html_vals = _vals_after(plain, name, prefix_exclude=_prefix)
+        _html_vals = []
+        for _alias in aliases:
+            _html_vals += _vals_after(plain, _alias, prefix_exclude=_prefix)
         if not _html_vals:
             missing.append(name)
             continue
