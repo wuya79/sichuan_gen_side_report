@@ -449,15 +449,18 @@ def gen_txt():
     lines.append(f"负荷               {_disp(load_avg, ' MW')}")
     lines.append(f"月内滚动均价         {_disp(rolling_avg)}")
     lines.append("")
-    # 2026-11-08：蓄水期不再用"超汛限"判断（水位高于汛限是常态）。
-    # 取自 2.2 蓄放水块的"蓄水"站与幅度，作为重要变化(4)。
+    # 2026-11-08：按水期取"重要变化(4)"——丰水期保留超汛限清单；非汛期用2.2蓄水进度。
     _ws_blk = block(raw, "蓄放水状态", "━━━", offset=7)
-    _prog = []
-    for _ln in (_ws_blk or "").split("\n"):
-        _m = re.match(r"^(\S+)\s+→\s+([蓄放]水)(?:\([^)]*\))?\s+([+-][\d.]+)万m³", _ln.strip())
-        if _m and _m.group(2) == "蓄水":
-            _prog.append(f"{_m.group(1)}{_m.group(3)}万m³")
-    exceed_str = " / ".join(_prog[:2]) if _prog else ""
+    if season == "丰水期":
+        _exc = re.findall(r"·([\u4e00-\u9fff]+)\([^)]*\)\s*水位[^\s]+\s*超汛限([+\-]?\d+)m", raw)
+        exceed_str = " / ".join(f"{_n}{_d}m" for _n, _d in _exc[:3]) if _exc else ""
+    else:
+        _prog = []
+        for _ln in (_ws_blk or "").split("\n"):
+            _m = re.match(r"^(\S+)\s+→\s+([蓄放]水)(?:\([^)]*\))?\s+([+-][\d.]+)万m³", _ln.strip())
+            if _m and _m.group(2) == "蓄水":
+                _prog.append(f"{_m.group(1)}{_m.group(3)}万m³")
+        exceed_str = " / ".join(_prog[:2]) if _prog else ""
     # 火电开机趋势是否连续持平（从源txt趋势数据动态判断）
     _fire_vals = [x.strip() for x in trend_days.split("→")] if trend_days else []
     _fire_flat = "连续7日持平" if _fire_vals and len(set(_fire_vals)) == 1 else ""
@@ -503,11 +506,20 @@ def gen_txt():
     lines.append("【数据表:天气前瞻】未来72小时流域降雨数据")
     lines.append("水情研判：")
     lines.append(f"综合来水指数{_disp(wi_val, '')}{wi_desc or '未取得'}，大渡河、雅砻江为双主驱动力。")
-    # 2026-11-08：原"超汛限→已开始放水"在蓄水期是反的；改为直接引用 2.2 蓄放水状态。
-    for _ln in (_ws_blk or "").split("\n"):
-        _m = re.match(r"^(\S+)\s+→\s+([蓄放]水)(?:\([^)]*\))?\s+([+-][\d.]+)万m³", _ln.strip())
-        if _m:
-            lines.append(f"{_m.group(1)}{_m.group(2)}{_m.group(3)}万m³，关注后续影响。")
+    # 2026-11-08：丰水期保留"超汛限→已开始放水"；非汛期改用 2.2 蓄放水状态（蓄水期水位高于汛限是常态）。
+    if season == "丰水期":
+        near_limit = re.findall(r"[🌊]?(大渡河|雅砻江|嘉陵江|岷江|涪江|金沙江)[·.]([\u4e00-\u9fff]+)\(.*?\).*?(距汛限[-\d]+m|超汛限[+\d]+m)", raw)
+        for river, name, status in near_limit[:5]:
+            if "超汛限" in status:
+                lines.append(f"{river}·{name}{status}已开始放水，关注后续影响。")
+            elif int(ext(status, r"(\d+)", "99")) <= 3 and "距" in status:
+                if name in ["瀑布沟","猴子岩","大岗山"]:
+                    lines.append(f"{river}·{name}蓄容已接近100%，若持续来水可能被迫加大放水。")
+    else:
+        for _ln in (_ws_blk or "").split("\n"):
+            _m = re.match(r"^(\S+)\s+→\s+([蓄放]水)(?:\([^)]*\))?\s+([+-][\d.]+)万m³", _ln.strip())
+            if _m:
+                lines.append(f"{_m.group(1)}{_m.group(2)}{_m.group(3)}万m³，关注后续影响。")
     try:
         _wi = float(wi_val)
     except (TypeError, ValueError):
