@@ -61,7 +61,7 @@ def main():
     data = {}
     m = re.search(r"均价(\d+)", report_text)
     data["avg_price"] = int(m.group(1)) if m else 0
-    m = re.search(r"水电(\d+)%", report_text)
+    m = re.search(r"水电(?:占比|占负荷)\s*[：:]?\s*(\d+)\s*%", report_text)
     data["hydro_pct"] = int(m.group(1)) if m else 0
     m = re.search(r"净缺口\s*([-\d,]+)", report_text)
     data["net_gap"] = int(m.group(1).replace(",","")) if m else 0
@@ -76,7 +76,7 @@ def main():
     if trend_match:
         parts = trend_match.group(1).split("→")
         data["trend_prices"] = [int(p) for p in parts if p.strip().isdigit()]
-    trend_hydro = re.search(r"水电占比:\s*([\d→↑↓%]+)", report_text)
+    trend_hydro = re.search(r"水电(?:占比|占负荷):\s*([\d→↑↓%]+)", report_text)
     if trend_hydro:
         parts = trend_hydro.group(1).split("→")
         data["trend_hydro"] = [int(p) for p in parts if p.strip().isdigit()]
@@ -187,13 +187,13 @@ def main():
         ax1.set_ylabel('电价 (元/MWh)', fontsize=10, color=color1); ax1.tick_params(axis='y', labelcolor=color1)
         if len(hydros_t) == 7:
             ax2 = ax1.twinx()
-            ax2.plot(days, hydros_t, 's-', color=color2, linewidth=1.5, markersize=5, label='水电占比(%)')
-            ax2.set_ylabel('水电占比 (%)', fontsize=10, color=color2); ax2.tick_params(axis='y', labelcolor=color2)
+            ax2.plot(days, hydros_t, 's-', color=color2, linewidth=1.5, markersize=5, label='水电占负荷(%)')
+            ax2.set_ylabel('水电占负荷 (%)', fontsize=10, color=color2); ax2.tick_params(axis='y', labelcolor=color2)
         if len(loads_t) == 7:
             ax3 = ax1.twinx(); ax3.spines['right'].set_position(('outward', 65))
             ax3.plot(days, [l/1000 for l in loads_t], '^--', color=color3, linewidth=1, markersize=5, label='负荷(GW)')
             ax3.set_ylabel('负荷 (GW)', fontsize=10, color=color3); ax3.tick_params(axis='y', labelcolor=color3)
-        ax1.set_title('近7日趋势：电价·水电占比·负荷', fontsize=13, fontweight='bold')
+        ax1.set_title('近7日趋势：电价·水电占负荷·负荷', fontsize=13, fontweight='bold')
         ax1.set_xticks(days); ax1.set_xticklabels(labels, fontsize=9, rotation=45)
         ax1.set_xlabel('日期', fontsize=10)
         handles, lbls = [], []
@@ -210,9 +210,9 @@ def main():
     fig, ax1 = plt.subplots(figsize=(12, 4.5))
     hydro_pcts = [88,91,93,95,96,96,94,88,84,78,76,75,74,75,77,84,87,87,89,90,90,88,83,85]
     colors = ['#E74C3C' if p <= 80 else '#F39C12' if p <= 85 else '#2ECC71' for p in hydro_pcts]
-    ax1.bar(range(24), hydro_pcts, color=colors, alpha=0.7, label='水电占比(%)')
-    ax1.set_xlabel('时段'); ax1.set_ylabel('水电占比(%)')
-    ax1.set_title('逐时水电占比与竞争分析', fontsize=14, fontweight='bold')
+    ax1.bar(range(24), hydro_pcts, color=colors, alpha=0.7, label='水电占负荷(%)')
+    ax1.set_xlabel('时段'); ax1.set_ylabel('水电占负荷(%)')
+    ax1.set_title('逐时水电占负荷与竞争分析', fontsize=14, fontweight='bold')
     ax1.set_xticks(range(0, 24, 2)); ax1.grid(True, alpha=0.3)
     ax1.axvspan(9, 14, alpha=0.1, color='green', label='竞争窗口')
     ax1.legend(loc='upper right')
@@ -247,7 +247,7 @@ def main():
 每个框必须引用关键数据做对比分析+解释成因和影响+给出指导意见。严禁逐条复述表格数据。
 
 每个框字数要求（不达标则重写）：
-- 核心指标摘要：500-800字。整合均价、水电占比、净缺口、火电出力的联动关系和环比变化，给出全局判断和操作建议
+- 核心指标摘要：500-800字。整合均价、水电占负荷、净缺口、火电出力的联动关系和环比变化，给出全局判断和操作建议
 - 水情监测：400-600字。分析流域来水对水电出力和电价的影响，水库蓄水/放水状态是否挤压火电（按报告中的实际状态表述：蓄水期用"蓄水/放水"，丰水期可用"超汛限"）
 - 供给预测：400-600字。净缺口反映的供需格局，火电被挤压程度，结论型判断
 - 出清回顾：300-500字。为什么午间电价低、为什么晚峰涨、对火电的启示
@@ -261,8 +261,8 @@ def main():
 【核心设计原则 - 表格精简】
 - 4.1 价格出清（24小时）：必须引用 <img src="charts/price_24h.png">（仅此一张24h电价走势图），下方只展示最高/最低/均价3行摘要，从图表和数据中提取实际值展示，不要臆想数值
 - 5.1 火电24小时出力：必须引用 <img src="charts/output_stack.png"> 展示各电源出力对比，火电部分用一段总结说明，绝对不要输出24行的逐小时出力表
-- 7.1 趋势仪表盘（近7日）：必须引用 <img src="charts/trend_7d.png"> 展示近7日电价/水电占比/净缺口趋势
-- 9.1 竞争空间（逐时水电占比）：必须引用 <img src="charts/competition.png"> 展示逐时水电占比与竞争窗口
+- 7.1 趋势仪表盘（近7日）：必须引用 <img src="charts/trend_7d.png"> 展示近7日电价/水电占负荷/净缺口趋势
+- 9.1 竞争空间（逐时水电占负荷）：必须引用 <img src="charts/competition.png"> 展示逐时水电占负荷与竞争窗口
 **【重要】以上4张图必须全部引用，每张图只能出现在指定的section中，不能重复，不能遗漏。**
 - 其余表格正常生成，保持25张以上的目标
 【重要标记说明】
@@ -270,7 +270,7 @@ def main():
 {chart_refs}
 
 参考风格：
-【核心研判】本期核心矛盾是净缺口与水电占比的联动：净缺口为正则火电有竞争空间，为负则水电挤压火电；价格由边际机组决定。按本期实际数据撰写，禁止套用丰水期/枯水期等往期季节结论。
+【核心研判】本期核心矛盾是净缺口与水电占负荷的联动：净缺口为正则火电有竞争空间，为负则水电挤压火电；价格由边际机组决定。按本期实际数据撰写，禁止套用丰水期/枯水期等往期季节结论。
 
 生成后请自检：表格是否达到25张以上？每个分析框字数是否达标？"""
 

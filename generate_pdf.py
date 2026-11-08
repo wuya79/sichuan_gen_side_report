@@ -124,7 +124,7 @@ def validate_data_integrity(html, report_text):
           "水电出力超过负荷／火电日均出力2026MW"把2026误当负荷值）；缺失逻辑不变。
     Returns: (ok, missing, mismatched)
     """
-    _fields = ['昨日均价', '净缺口', '水电占比', '火电日均出力', '负荷', '滚动加权', '月度交易价格']
+    _fields = ['昨日均价', '净缺口', '水电占负荷', '火电日均出力', '负荷', '滚动加权', '月度交易价格']
     # HTML侧剔除目录页（页码会被误当字段值），再剥标签
     _body = re.sub(r'<div[^>]*class="toc-page"[^>]*>.*?(?=<section)', ' ', html, flags=re.S)
     plain = re.sub(r'<[^>]+>', ' ', _body)
@@ -223,14 +223,14 @@ CHART_DEFS = {
     "trend_7d.png": {
         "section_label": "板块六（趋势仪表盘）",
         "section_kw": ["趋势", "trend"],
-        "fig_label": "图3", "caption": "近7日趋势（电价·水电占比·净缺口）",
+        "fig_label": "图3", "caption": "近7日趋势（电价·水电占负荷·净缺口）",
         "prompt_rule": '- 6.1 趋势仪表盘（近7日）：必须引用图表 <img src="charts/trend_7d.png">，下方只展示趋势研判分析，不要逐条复述数据',
     },
     "competition.png": {
         "section_label": "板块八（竞争空间）",
         "section_kw": ["竞争", "competition", "comp"],
-        "fig_label": "图4", "caption": "逐时水电占比与竞争分析",
-        "prompt_rule": '- 8.1 竞争空间（逐时水电占比）：必须引用图表 <img src="charts/competition.png">，下方用一段总结代替24行逐时表，聚焦竞争窗口分析',
+        "fig_label": "图4", "caption": "逐时水电占负荷与竞争分析",
+        "prompt_rule": '- 8.1 竞争空间（逐时水电占负荷）：必须引用图表 <img src="charts/competition.png">，下方用一段总结代替24行逐时表，聚焦竞争窗口分析',
     },
 }
 
@@ -257,7 +257,7 @@ def parse_report_data(text, yesterday_str=None):
         return float(m.group(1)) if m else None
 
     data["avg_price"] = _int_or_none(r"昨日均价[：:]?\s*(-?[\d.]+)")
-    data["hydro_pct"] = _int_or_none(r"水电占比[：:]?\s*([\d.]+)\s*%")
+    data["hydro_pct"] = _int_or_none(r"水电(?:占比|占负荷)[：:]?\s*([\d.]+)\s*%")
     data["net_gap"] = _int_or_none(r"净缺口[：:]?\s*([+\-]?[\d,]+)")
     data["thermal_load"] = _float_or_none(r"火电利用率[：:]?\s*([\d.]+)\s*%")
     data["fire_avg"] = _int_or_none(r"火电日均出力[：:]?\s*([\d.]+)")
@@ -272,7 +272,7 @@ def parse_report_data(text, yesterday_str=None):
     if trend_match:
         parts = trend_match.group(1).split("→")
         data["trend_prices"] = [int(p) for p in parts if p.strip().isdigit()]
-    trend_hydro = re.search(r"水电占比:\s*([\d→↑↓%]+)", text)
+    trend_hydro = re.search(r"水电(?:占比|占负荷):\s*([\d→↑↓%]+)", text)
     if trend_hydro:
         parts = trend_hydro.group(1).split("→")
         data["trend_hydro"] = [int(p) for p in parts if p.strip().isdigit()]
@@ -431,12 +431,12 @@ def gen_charts(data, charts_dir, date_str=None):
         axes[0].set_title('近7日电价趋势', fontsize=12, fontweight='bold')
         axes[0].grid(True, alpha=0.3)
         
-        # 水电占比
+        # 水电占负荷
         if data.get("trend_hydro"):
             axes[1].fill_between(days, data["trend_hydro"][:7], alpha=0.5, color='#3498DB')
             axes[1].plot(days, data["trend_hydro"][:7], 'o-', color='#2980B9')
-            axes[1].set_ylabel('水电占比(%)')
-            axes[1].set_title('近7日水电占比', fontsize=12, fontweight='bold')
+            axes[1].set_ylabel('水电占负荷(%)')
+            axes[1].set_title('近7日水电占负荷', fontsize=12, fontweight='bold')
             axes[1].grid(True, alpha=0.3)
         
         # 净缺口（仅当日单值：水平线+标注，禁止7根同值柱冒充趋势）
@@ -472,9 +472,9 @@ def gen_charts(data, charts_dir, date_str=None):
     hydro_vals = [ch['hydro'] for ch in comp_hourly]
     load_vals = [ch['load'] for ch in comp_hourly]
     colors = ['#E74C3C' if p <= 80 else '#F39C12' if p <= 85 else '#2ECC71' for p in hydro_pcts]
-    ax1.bar(hours, hydro_pcts, color=colors, alpha=0.7, label='水电占比(%)')
-    ax1.set_xlabel('时段'); ax1.set_ylabel('水电占比(%)')
-    ax1.set_title('逐时水电占比与竞争分析', fontsize=14, fontweight='bold')
+    ax1.bar(hours, hydro_pcts, color=colors, alpha=0.7, label='水电占负荷(%)')
+    ax1.set_xlabel('时段'); ax1.set_ylabel('水电占负荷(%)')
+    ax1.set_title('逐时水电占负荷与竞争分析', fontsize=14, fontweight='bold')
     ax1.set_xticks(range(0, 24, 2))
     ax1.grid(True, alpha=0.3)
     # 标记竞争窗口
@@ -531,7 +531,7 @@ def build_prompt(report_text, chart_files):
 每个框必须引用关键数据做对比分析+解释成因和影响+给出指导意见。严禁逐条复述表格数据。
 
 每个框字数要求（不达标则重写）：
-- 核心指标摘要：500-800字。整合均价、水电占比、净缺口、火电出力的联动关系和环比变化，给出全局判断和操作建议
+- 核心指标摘要：500-800字。整合均价、水电占负荷、净缺口、火电出力的联动关系和环比变化，给出全局判断和操作建议
 - 水情监测：400-600字。分析流域来水对水电出力和电价的影响，水库蓄水/放水状态是否挤压火电（按报告中的实际状态表述：蓄水期用"蓄水/放水"，丰水期可用"超汛限"）
 - 供给预测：400-600字。净缺口反映的供需格局，火电被挤压程度，结论型判断
 - 出清回顾：300-500字。为什么午间电价低、为什么晚峰涨、对火电的启示
@@ -554,10 +554,10 @@ def build_prompt(report_text, chart_files):
 3. 数据区中不存在的数值，正文、表格、分析框中一律禁止出现。
 
 【数字溯源 - 硬约束】
-正文、表格、分析框中出现的关键数据数值（价格、出力、占比、缺口、水位、水量、气温等）必须能在下方【数据】原文中找到出处（允许单位换写，不允许数值变化）。分析需要引用某个缺失数据时，必须写"数据未取得，无法判断"，严禁猜测具体数值。字段名称必须与【数据】原文保持一致（如"昨日均价""净缺口""水电占比""火电日均出力"），不得改写为其他叫法。
+正文、表格、分析框中出现的关键数据数值（价格、出力、占比、缺口、水位、水量、气温等）必须能在下方【数据】原文中找到出处（允许单位换写，不允许数值变化）。分析需要引用某个缺失数据时，必须写"数据未取得，无法判断"，严禁猜测具体数值。字段名称必须与【数据】原文保持一致（如"昨日均价""净缺口""水电占负荷""火电日均出力"），不得改写为其他叫法。
 
 参考风格（仅示意结构；所有方向性描述必须以【数据】表内实际数值为准，严禁照抄示例措辞）：
-【核心研判】先给结论，再给数据依据。水电占比、火电开机等水平描述必须与数据表数值一致；"宽松/偏紧""高位/低位""升水/贴水"等方向词只能依据数据推导，严禁写与数据相反的方向（升水=滚动高于现货，贴水=滚动低于现货）。
+【核心研判】先给结论，再给数据依据。水电占负荷、火电开机等水平描述必须与数据表数值一致；"宽松/偏紧""高位/低位""升水/贴水"等方向词只能依据数据推导，严禁写与数据相反的方向（升水=滚动高于现货，贴水=滚动低于现货）。
 
 生成后请自检：表格是否达到25张以上？每个分析框字数是否达标？"""
 

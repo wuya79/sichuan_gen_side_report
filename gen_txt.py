@@ -439,13 +439,13 @@ def gen_txt():
         _ng_int = 0
         _gap_judge = "—"
     lines.append(f"昨日均价：{_disp(avg_price)} | 今日凌晨：{_disp(today_morning)} | 净缺口：{net_gap if net_gap else '未取得'}MW（{_gap_judge}）")
-    lines.append(f"水电占比：{_disp(hydro_pct, '%')} | 火电日均出力：{_disp(fire_avg, ' MW')} | 月内滚动均价：{_disp(rolling_avg)}")
+    lines.append(f"水电占负荷：{_disp(hydro_pct, '%')} | 火电日均出力：{_disp(fire_avg, ' MW')} | 月内滚动均价：{_disp(rolling_avg)}")
     lines.append("")
     lines.append(f"指标                数值")
     lines.append(f"昨日均价            {_disp(avg_price)}")
     lines.append(f"火电日均出力          {_disp(fire_avg, ' MW')}")
     lines.append(f"净缺口              {net_gap if net_gap else '未取得'}MW（{_gap_judge}）")
-    lines.append(f"水电占比            {_disp(hydro_pct, '%')}")
+    lines.append(f"水电占负荷          {_disp(hydro_pct, '%')}")
     lines.append(f"负荷               {_disp(load_avg, ' MW')}")
     lines.append(f"月内滚动均价         {_disp(rolling_avg)}")
     lines.append("")
@@ -466,7 +466,7 @@ def gen_txt():
     _fire_flat = "连续7日持平" if _fire_vals and len(set(_fire_vals)) == 1 else ""
     lines.append(f"重要变化：（1）火电开机{_disp(thermal_cap, 'MW')}（{_disp(thermal_units, '台')}）{_fire_flat}；"
                  f"（2）净缺口{net_gap if net_gap else '未取得'}MW，{_gap_judge}；"
-                 f"（3）水电占比{_disp(hydro_pct, '%')}；"
+                 f"（3）水电占负荷{_disp(hydro_pct, '%')}；"
                  f"{'（4）' + exceed_str + '。' if exceed_str else ''}")
     lines.append("")
 
@@ -540,7 +540,7 @@ def gen_txt():
     # ── 三、供给预测 ──
     lines.append("三、供给预测（今日）")
     lines.append("")
-    lines.append(f"项目               数值                  占比")
+    lines.append(f"项目               数值                  占可用%")
     # 占比动态计算（旧版硬编码97.5%/6.6%/13.5%）
     _ta_int = int(total_avail) if total_avail.isdigit() else 0
     _hydro_share = round(int(hydro_avail) / _ta_int * 100, 1) if _ta_int and hydro_avail.isdigit() else None
@@ -814,11 +814,11 @@ def gen_txt():
     lines.append("")
 
     # ── 八、水电占比与竞争空间 ──
-    lines.append("八、水电占比与竞争空间（昨日逐时）")
+    lines.append("八、水电占负荷与竞争空间（昨日逐时）")
     lines.append("")
     comp_data = get_competition_data(yesterday_str)
     if comp_data:
-        lines.append("时段       负荷(MW)   水电(MW)   占比   净缺口(MW)   竞争判断")
+        lines.append("时段       负荷(MW)   水电(MW)   占负荷%   净缺口(MW)   竞争判断")
         for cd in comp_data:
             gap_str = f"+{cd['gap']}" if cd['gap'] >= 0 else str(cd['gap'])
             lines.append(f"{cd['hour']:02d}:00    {cd['load']:,}    {cd['hydro']:,}     {cd['pct']}%   {gap_str:>8}   {cd['judge']}")
@@ -843,7 +843,7 @@ def gen_txt():
             pcts = [cd['pct'] for cd in space_hours]
             h_start = space_hours[0]['hour']
             h_end = space_hours[-1]['hour']
-            lines.append(f"  有竞争空间：{h_start:02d}-{h_end:02d}时，净缺口+{min(gaps)}~+{max(gaps)} MW，水电占比{min(pcts)}-{max(pcts)}%")
+            lines.append(f"  有竞争空间：{h_start:02d}-{h_end:02d}时，净缺口+{min(gaps)}~+{max(gaps)} MW，水电占负荷{min(pcts)}-{max(pcts)}%")
         # 找供给最过剩的时段
         worst = min(comp_data, key=lambda cd: cd['gap'])
         lines.append(f"  供给最过剩：{worst['hour']:02d}时净缺口{worst['gap']} MW")
@@ -929,7 +929,7 @@ def gen_txt():
         lines.append("现货与滚动价差：未取得（现货或滚动价格缺失）")
     lines.append("")
     lines.append("10.3 竞争格局参考")
-    lines.append("时段        电价(MWh)   净缺口(MW)    水电占比")
+    lines.append("时段        电价(MWh)   净缺口(MW)    水电占负荷")
     if comp_data:
         # 按时段聚合
         periods = [("00-08时", 0, 8), ("08-10时", 8, 10), ("10-15时", 10, 15),
