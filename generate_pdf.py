@@ -114,6 +114,17 @@ def check_html(html):
     return "</html>" in html and html.count("<section") >= 8
 
 
+# ─── 分析框统一守卫（发电侧/售电侧共用，200字硬下限） ─────────
+sys.path.insert(0, os.path.expanduser("~/.hermes/scripts"))
+import analysis_guard as ag
+
+GEN_LABELS = {
+    "一": "核心研判", "二": "水情研判", "三": "供给研判", "四": "出清研判",
+    "五": "火电复盘", "六": "趋势研判", "七": "交易研判", "八": "竞争空间研判",
+    "九": "检修研判", "十": "市场综合研判",
+}
+
+
 def validate_data_integrity(html, report_text):
     """数据完整性校验 v2 (2026-09-02 重写):
     从发电侧txt提取6个核心字段值 → HTML剥标签纯文本中同字段提取 → 数值一致性比对。
@@ -206,12 +217,10 @@ def move_captions(html):
 
 
 def _fix_cover(html):
-    """封面硬约束：删除LLM擅自添加的'日前市场/实时市场'日期行(2026-09-02用户发现编造日期)。
-    用tempered dot防止跨标签吞并相邻的'报告周期'行。
-    2026-11-08：封面恢复上一版样式——白底、标题、细横线、三行元数据（编制单位/水期/报告周期），
-    去掉副标题/彩色色块；只改封面，不动正文与图表。
+    """封面硬约束：重建封面时只保留编制单位/水期/报告周期，丢弃LLM擅自添加的
+    '日前市场/实时市场'日期行。只改封面，不动正文与图表。
+    （2026-11-08 修：旧版用全局正则删所有含这两个词的<p>，会误删正文分析段落。）
     """
-    html = re.sub(r'<p[^>]*>(?:(?!</p>).)*?(?:日前市场|实时市场)(?:(?!</p>).)*?</p>\s*', '', html, flags=re.S)
     _start = html.find('<div class="cover"')
     if _start < 0:
         return html
@@ -566,7 +575,7 @@ def build_prompt(report_text, chart_files):
 1. 输出完整HTML（<!DOCTYPE html>到</html>），不要Markdown代码块
 2. 必须包含：封面(.cover) + 目录(目录容器div的class必须为"toc-page") + 10个section
 3. 总表格数必须达到25张以上，每张表有<caption data-label="表X">标题</caption>
-4. 每个section结尾必须有<div class="analysis-box"><p>分析内容</p></div>
+4. 每个section结尾必须有<div class="analysis-box"><p>XX研判：实质分析正文（200-350字）</p></div>
 5. 所有单元格填入实际数据，禁止"--"
 6. 每个section的标题用<h2>标签
 7. 图表引用格式：<figure><img src="charts/图表名.png"><figcaption data-label="图X">标题</figcaption></figure>
@@ -577,19 +586,19 @@ def build_prompt(report_text, chart_files):
 {css}
 
 【分析框核心规则】
-每个框必须引用关键数据做对比分析+解释成因和影响+给出指导意见。严禁逐条复述表格数据。
+每个框必须以“XX研判：”开头（核心研判/水情研判/供给研判/出清研判/火电复盘/趋势研判/交易研判/竞争空间研判/检修研判），先结论后数据，至少引用2个具体数据点（带数值）+1条操作建议；只有标题、空泛复述表格、字数不足，均视为不合格。
 
-每个框字数要求（不达标则重写）：
-- 核心指标摘要：500-800字。整合均价、水电占负荷、净缺口、火电出力的联动关系和环比变化，给出全局判断和操作建议
-- 水情监测：400-600字。分析流域来水对水电出力和电价的影响，水库蓄水/放水状态是否挤压火电（按报告中的实际状态表述：蓄水期用"蓄水/放水"，丰水期可用"超汛限"）
-- 供给预测：400-600字。净缺口反映的供需格局，火电被挤压程度，结论型判断
-- 出清回顾：300-500字。为什么午间电价低、为什么晚峰涨、对火电的启示
-- 火电复盘：400-600字。开机趋势和净缺口联动，预判未来1-2天变化可能性
-- 趋势研判：300-500字。7日趋势分析，给出看多/看空/持平的判断
-- 月内交易：300-500字。期现价差反映的市场预期，对后续合约价格的判断
-- 检修信息：300-500字。在修设备对可用容量和送出能力的限制
-- 竞争空间：300-500字。聚焦数据反映的驱动力（如光伏出力、晚峰负荷的逐时变化，方向以数据为准），不要重复时段分解，给出火电出力安排建议
-- 市场参考：300-500字。从交易策略角度研判：①期现价差含义 ②当前水期交易策略建议 ③风险预警
+每个框字数要求（200字为硬下限，200-350字为目标；不达标则重写）：
+- 核心指标摘要：200-350字。整合均价、水电占负荷、净缺口、火电出力的联动关系和环比变化，给出全局判断和操作建议
+- 水情监测：200-350字。分析流域来水对水电出力和电价的影响，水库蓄水/放水状态是否挤压火电（按报告中的实际状态表述：蓄水期用"蓄水/放水"，丰水期可用"超汛限"）
+- 供给预测：200-350字。净缺口反映的供需格局，火电被挤压程度，结论型判断
+- 出清回顾：200-350字。为什么午间电价低、为什么晚峰涨、对火电的启示
+- 火电复盘：200-350字。开机趋势和净缺口联动，预判未来1-2天变化可能性
+- 趋势研判：200-350字。7日趋势分析，给出看多/看空/持平的判断
+- 月内交易：200-350字。期现价差反映的市场预期，对后续合约价格的判断
+- 检修信息：200-350字。在修设备对可用容量和送出能力的限制
+- 竞争空间：200-350字。聚焦数据反映的驱动力（如光伏出力、晚峰负荷的逐时变化，方向以数据为准），不要重复时段分解，给出火电出力安排建议
+- 市场参考：200-350字。从交易策略角度研判：①期现价差含义 ②当前水期交易策略建议 ③风险预警（此后处理会覆盖，写短即可）
 
 【核心设计原则 - 表格精简】
 {chart_rules_text}
@@ -608,18 +617,22 @@ def build_prompt(report_text, chart_files):
 参考风格（仅示意结构；所有方向性描述必须以【数据】表内实际数值为准，严禁照抄示例措辞）：
 【核心研判】先给结论，再给数据依据。水电占负荷、火电开机等水平描述必须与数据表数值一致；"宽松/偏紧""高位/低位""升水/贴水"等方向词只能依据数据推导，严禁写与数据相反的方向（升水=滚动高于现货，贴水=滚动低于现货）。
 
-生成后请自检：表格是否达到25张以上？每个分析框字数是否达标？"""
+【分析结构示例（只学结构；所有X必须替换为本次【数据】中的真实数值，禁止照抄示例数字）】
+核心研判：本日核心指标呈现“供给偏紧/宽松、价格上行/回落、火电承压/受益”的特征。昨日均价X元/MWh，较前一日X元/MWh变化X%；净缺口+X MW，占负荷X%；水电占负荷X%，火电日均出力X MW。综合判断：……。操作建议：一是……；二是……；三是……。
+水情研判：当前处于X期，调度原则为“X”。综合来水指数X，流域来水X；重点水库蓄满率X%—X%，瀑布沟、锦屏一级等处于蓄水/放水状态。对火电的影响：……。
+供给研判：今日供给预测显示，日均负荷X MW，系统总可用X MW；其中水电可用X MW（占可用X%）、新能源X MW、非市场化X MW；净缺口+X MW（占负荷X%）。火电竞争空间：……。
+
+生成后请自检：表格是否达到25张以上？每个分析框是否以“XX研判：”开头、达到200字下限、含至少2个数据点+1条操作建议？"""
 
     user = f"""请根据以下四川燃煤电厂发电侧日报数据，生成完整的HTML报告。
 
 【硬性要求】
 1. 输出必须是完整HTML（从<!DOCTYPE html>到</html>），不要Markdown代码块
 2. 包含封面、目录、全部10个section，总表格≥25张
-3. 每个section结尾必须有分析框，字数达标、禁止复述表格数据、必须有指导意见
+3. 每个section结尾必须有分析框，以“XX研判：”开头，200字以上、至少2个数据点+1条建议、禁止复述表格数据
 4. 在对应section中引用以下图表（禁止使用其他文件名）：
 {chart_instructions_text}
 5. 所有单元格填入实际数据
-6. 【重要】封面用上一版白底样式：只允许 报告标题 + 一条细横线 + 三行元数据（编制单位、水期与调度原则、报告周期）；禁止副标题（如“发电侧运营与交易策略分析”）、彩色背景、红框/色块、图标。日期只允许“报告周期：{cover_date_str}”，严禁在封面写“日前市场”“实时市场”或任何其他日期/市场字样。
 
 【数据】
 {report_text[:15000]}
@@ -926,7 +939,7 @@ def _fix_market_analysis(html, report_text):
         _strat = f"{_season}供需缺口未取得，建议按机组成本与顶峰能力灵活安排"
 
     new_box = f"""<div class="analysis-box">
-        <p>【市场综合研判】全天均价{spot_str}/MWh，现货与滚动均价{rolling_str}价差{spread_str}，{_spread_desc}。{_strat}，关注来水变化信号带来的市场格局变化。{'月度交易价格' + monthly_str + '可作远期合约定价参考。' if monthly else ''}</p>
+        <p>【市场综合研判】全天均价{spot_str}/MWh，现货与滚动均价{rolling_str}价差{spread_str}，{_spread_desc}。{_strat}，关注来水变化信号带来的市场格局变化。{'月度交易价格' + monthly_str + '可作远期合约定价参考。' if monthly else ''}操作上，滚动升水时可在远月锁定部分电量，贴水时保留现货敞口，并跟踪净缺口与来水变化对价差的修正，逢高锁定收益、控制敞口风险。</p>
     </div>"""
     
     return html[:box_start] + new_box + html[box_end:]
@@ -1049,23 +1062,25 @@ def generate_pdf(api_key_open, api_key_code):
         raw = kimi_call_with_fallback(api_key_open, api_key_code, system, user, timeout=600, max_tokens=100000)
         html = extract_html(raw)
 
-        # 完整性校验: 结构+数值一致性, 最多3次尝试
+        # 完整性校验: 结构+数值一致性, 最多3次尝试（分析框由后处理统一守卫补写，不整篇重试）
         integrity_warning = False
         integrity_detail = ""
+        analysis_warning = False
+        analysis_detail = ""
         _ok, _missing, _mismatch = validate_data_integrity(html, report_text)
         if not (check_html(html) and _ok):
             for attempt in range(2, 4):
                 _why = _missing + _mismatch
                 log.warning(f"  第{attempt-1}次校验未通过: 缺{_missing or '无'}, 不一致{_mismatch or '无'}，重试...")
                 raw = kimi_call_with_fallback(api_key_open, api_key_code, system,
-                    user + f"\n\n【重要】上次输出存在问题: {_why or '结构不完整'}。缺失字段必须在对应表格/摘要中原样补上；不一致字段必须改为txt【数据】中的数值，禁止编造。",
+                    user + f"\n\n【重要】上次输出存在问题: {'; '.join(_why) or '结构不完整'}。缺失字段必须在对应表格/摘要中原样补上；不一致字段必须改为txt【数据】中的数值，禁止编造；不要改动其他已正确的数据和表格。",
                     timeout=600, max_tokens=100000)
                 html = extract_html(raw)
                 _ok, _missing, _mismatch = validate_data_integrity(html, report_text)
                 if check_html(html) and _ok:
                     log.info(f"  完整性校验通过 (第{attempt}次)")
                     break
-            else:
+            if not (check_html(html) and _ok):
                 integrity_warning = True
                 integrity_detail = f"缺{_missing or '无'}, 数值不一致{_mismatch or '无'}"
                 log.error(f"  ⚠️ 3次生成均未通过完整性校验({integrity_detail})，使用最后一次输出并标注告警")
@@ -1095,8 +1110,23 @@ def generate_pdf(api_key_open, api_key_code):
         
         # Step 4: caption下移
         html = move_captions(html)
-        # Step 4.1: 封面硬约束（删除编造的日前/实时市场日期行）
+        # Step 4.1: 封面硬约束（重建封面，丢弃编造的日前/实时市场日期行）
         html = _fix_cover(html)
+        # 后处理完成后：分析框统一守卫（逐框补写 + 终审；200字硬下限）
+        html, _journal = ag.repair_boxes(
+            html, report_text,
+            lambda _s, _u: kimi_call_with_fallback(api_key_open, api_key_code, _s, _u,
+                                                   timeout=180, max_tokens=1200),
+            side="发电侧", label_map=GEN_LABELS, min_chars=200)
+        for _j in _journal:
+            log.info(f"  分析框: {_j['section']} {_j['before']}→{_j['after']}字 {_j['status']}")
+        _audit = ag.audit(html, min_chars=200)
+        if _audit['empty'] or _audit['short']:
+            if _audit['empty']:
+                html = ag.strip_empty(html)
+            analysis_warning = True
+            analysis_detail = ag.format_audit(_audit)
+            log.warning(f"  ⚠️ 分析框终审: {analysis_detail}")
         
         # 保存HTML
         html_file = job_dir / f"gen_side_{date_short}.html"
@@ -1130,6 +1160,8 @@ def generate_pdf(api_key_open, api_key_code):
             "charts": len(chart_files),
             "integrity_warning": integrity_warning,
             "integrity_detail": integrity_detail,
+            "analysis_warning": analysis_warning,
+            "analysis_detail": analysis_detail,
             "na_warning": na_warning,
         })
         
@@ -1162,6 +1194,8 @@ def main():
             print(result["na_warning"])
         if result.get("integrity_warning"):
             print(f"⚠️ 数据完整性校验未通过(3次重试): {result.get('integrity_detail','')}，请人工核对今日PDF关键数据")
+        if result.get("analysis_warning"):
+            print(f"⚠️ 分析框仍为空/偏短: {result.get('analysis_detail','')}，请人工复核")
         print(f"\n✓ 成功")
         print(f"  PDF: {result['pdf_url']}")
         print(f"  TXT: {result['txt_url']}")
