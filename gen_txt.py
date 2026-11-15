@@ -831,7 +831,8 @@ def gen_txt():
         lines.append("德宝直流：0MW（无潮流·疑停报待核）")
     else:
         lines.append(f"德宝直流：{_debao_dir or '—'} {_disp(debao, 'MW')}")
-    lines.append(f"省间净受入合计：{_disp(debao, 'MW')}")
+    _net_m = re.search(r"省间受入\(不含送出\)[:：].*?合计([\d,]+)MW", raw)
+    lines.append("省间受入(不含送出)合计：" + (f"{_net_m.group(1)}MW" if _net_m else "未取得（销售侧合计缺失）"))
     lines.append("")
     lines.append("关键时段：")
     # 从comp_data动态生成关键时段结论
